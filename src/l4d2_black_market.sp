@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.4"
+#define PLUGIN_VERSION  "1.3.5"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -161,6 +161,7 @@ void RegisterCommands()
 	// 本地开服用的作弊命令（受 sm_bm_cheat_enabled 控制）
 	RegConsoleCmd("sm_bm_add", Cmd_CheatAdd, "给自己加/减补给点，例: !bmadd 500");
 	RegConsoleCmd("sm_bmadd",  Cmd_CheatAdd, "同上（聊天框 !bmadd 会映射到这个名字）");
+	RegConsoleCmd("sm_bmzero", Cmd_ZeroPoints, "把自己的补给点清零");
 	RegConsoleCmd("sm_cheat",  Cmd_Cheat,    "开关自动补给点（花多少自动补满）");
 
 	RegAdminCmd("sm_bm_give",     Cmd_AdminGive, ADMFLAG_CHEATS, "sm_bm_give <目标> <数量>  发补给点");
@@ -848,6 +849,26 @@ public Action Cmd_Top(int client, int args)
  *  作弊命令（本地开服自用）
  * ============================================================ */
 
+public Action Cmd_ZeroPoints(int client, int args)
+{
+	if (!client || !IsClientInGame(client))
+	{
+		return Plugin_Handled;
+	}
+
+	if (!g_cvCheatEnabled.BoolValue)
+	{
+		PrintToChat(client, "%s 服务器关掉了作弊命令", BM_TAG);
+		return Plugin_Handled;
+	}
+
+	int before = g_iPoints[client];
+	g_iPoints[client] = 0;
+
+	PrintToChat(client, "%s 补给点已清零（原 \x04%d\x01 → \x040\x01）", BM_TAG, before);
+	return Plugin_Handled;
+}
+
 public Action Cmd_CheatAdd(int client, int args)
 {
 	if (!client || !IsClientInGame(client))
@@ -863,7 +884,7 @@ public Action Cmd_CheatAdd(int client, int args)
 
 	if (args < 1)
 	{
-		PrintToChat(client, "%s 用法: !bmadd <数量>     例: !bmadd 500", BM_TAG);
+		PrintToChat(client, "%s 用法: !bmadd <数量>     清零用 !bmzero", BM_TAG);
 		return Plugin_Handled;
 	}
 
