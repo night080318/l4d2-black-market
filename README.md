@@ -59,6 +59,7 @@ A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn poin
 | `!top` | 排行榜前 10 |
 | `!cheat` | 自动补给（作弊） |
 | `!bmadd <n>` | 加减点数（作弊） |
+| `!bmzero` | 补给点清零（作弊） |
 | `sm_bm_give <目标> <n>` | 管理员发点 |
 | `sm_bm_resetall` | 清空存档（root） |
 
