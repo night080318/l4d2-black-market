@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.2 — 2026-11-14
+
+### 修复：音效终于能响了
+
+这一版是前面 1.3.8 ~ 1.4.1 一系列排查的最终结论。
+
+**根因**：L4D2 里 `EmitSound` / `EmitSoundToClient` 走的是服务器音效系统，要求音效在 `scripts/game_sounds_manifest.txt` 注册过。新增的音效路径即便文件存在、`PrecacheSound` 返回成功（`precache=Y`），播放时仍然被静默丢弃——不报错、不打日志。
+
+试过但**无效**的路线：
+- wav 44100Hz → 22050Hz
+- 去掉 ffmpeg 塞进来的 `LIST` 块（对齐游戏自带 wav 的 `fmt + data` 结构）
+- 散文件放进 `sound/` vs 打进 VPK
+- 写 soundscript + 覆盖 `game_sounds_manifest.txt` 注册
+
+**实测唯一可用**：客户端 `play` 命令。它绕开注册表，直接在本地文件系统读文件。
+
+**最终实现**：
+- 音效格式改为 **mp3**（44100Hz / 128kbps / 单声道）
+- 播放统一走 `ClientCommand(client, "play …")`，`sm_bm_sound_mode` 默认 `0`
+- 移除 soundscript 与 manifest 覆盖（不再需要，也避免覆盖原版清单的风险）
+- 音效包瘦身到 3 个文件（addoninfo + 2 mp3），16 KB
+
+### 其它
+- `!bm_sndtest` 保留为三段自检命令，方便以后回归验证
+
 ## 1.3.7 — 2026-11-14
 
 ### 修复

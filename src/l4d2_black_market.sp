@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.7"
+#define PLUGIN_VERSION  "1.4.2"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -80,6 +80,10 @@ ConVar   g_cvAttrs;
 ConVar   g_cvCampaignReset;
 ConVar   g_cvResetPoints;
 ConVar   g_cvDebug;
+ConVar   g_cvSoundMode;
+bool     g_bPrecBuy = false;
+bool     g_bPrecDeny = false;
+int      g_iSndTestCount[MAXPLAYERS + 1];
 
 Database g_hDB = null;
 bool     g_bDBReady = false;
@@ -120,6 +124,7 @@ public void OnPluginStart()
 	g_cvCampaignReset = CreateConVar("sm_bm_campaign_reset", "1", "1=通关或全灭后清空属性", _, true, 0.0, true, 1.0);
 	g_cvResetPoints  = CreateConVar("sm_bm_reset_points", "1",    "1=通关时补给点也一起清零", _, true, 0.0, true, 1.0);
 	g_cvDebug        = CreateConVar("sm_bm_debug",        "0",    "1=在服务器控制台输出投掷物加速的调试信息", _, true, 0.0, true, 1.0);
+	g_cvSoundMode    = CreateConVar("sm_bm_sound_mode",   "0",    "0=客户端 play 命令（默认，唯一实测可用的方式）  1=引擎 EmitSound", _, true, 0.0, true, 1.0);
 
 	LoadShopTable();
 	HookGameEvents();
@@ -163,6 +168,7 @@ void RegisterCommands()
 	RegConsoleCmd("sm_bmadd",  Cmd_CheatAdd, "同上（聊天框 !bmadd 会映射到这个名字）");
 	RegConsoleCmd("sm_bmzero", Cmd_ZeroPoints, "把自己的补给点清零");
 	RegConsoleCmd("sm_bm_sndcheck", Cmd_SoundCheck, "检查音效文件是否被游戏读到");
+	RegConsoleCmd("sm_bm_sndtest",  Cmd_SoundTest,  "分别用引擎和 play 命令放两声，测试哪条路通");
 	RegConsoleCmd("sm_cheat",  Cmd_Cheat,    "开关自动补给点（花多少自动补满）");
 
 	RegAdminCmd("sm_bm_give",     Cmd_AdminGive, ADMFLAG_CHEATS, "sm_bm_give <目标> <数量>  发补给点");
@@ -280,14 +286,33 @@ void AwardPoints(int client, int amount, const char[] reason, bool notify)
 	}
 }
 
-/* 提示音：音效文件由创意工坊配套包提供，没订阅的客户端听不到，但不影响任何功能 */
-void PlayClientSound(int client, const char[] file)
+/* 提示音：音效文件由创意工坊配套包提供，没订阅的客户端听不到，但不影响任何功能。
+   L4D2 里 EmitSoundToClient 对 VPK 内的自定义音效经常不发声（连预缓存都不管用），
+   所以直接用客户端 play 命令读本地文件——只要客户端有这个 wav 就能响。 */
+/* 提示音：必须走 soundscript 名字。
+   直接给文件路径的话，L4D2 只播 registered（game_sounds_manifest 里注册过）的音效，
+   新路径会被静默丢弃——这是前面几轮排查的最终结论。 */
+void PlayClientSound(int client, const char[] script, const char[] file = "")
 {
 	if (!g_cvSounds.BoolValue)
 	{
 		return;
 	}
-	EmitSoundToClient(client, file);
+
+	if (g_cvSoundMode.BoolValue)
+	{
+		EmitSoundToClient(client, script);
+		return;
+	}
+
+	if (file[0] == '\0')
+	{
+		return;
+	}
+
+	char cmd[128];
+	Format(cmd, sizeof(cmd), "play %s", file);
+	ClientCommand(client, cmd);
 }
 
 /* ============================================================
@@ -711,7 +736,7 @@ void TryBuy(int client, int idx)
 	{
 		PrintToChat(client, "%s 补给点不够：%s 需要 \x04%d\x01，你只有 %d",
 			BM_TAG, g_eShop[idx].name, price, g_iPoints[client]);
-		PlayClientSound(client, "blackmarket/bm_deny.wav");
+		PlayClientSound(client, "BlackMarket.Deny", "blackmarket/bm_deny.mp3");
 		ReopenMenu(client, -1);
 		return;
 	}
@@ -749,7 +774,7 @@ void TryBuy(int client, int idx)
 	PrintToChat(client, "%s 买到 \x04%s\x01，花费 \x04%d\x01，剩余 \x04%d",
 		BM_TAG, g_eShop[idx].name, price, g_iPoints[client]);
 	PrintHintText(client, "黑市：%s  -%d", g_eShop[idx].name, price);
-	PlayClientSound(client, "blackmarket/bm_buy.wav");
+	PlayClientSound(client, "BlackMarket.Buy", "blackmarket/bm_buy.mp3");
 
 	if (IsOnSale(idx))
 	{
@@ -862,10 +887,58 @@ public Action Cmd_ZeroPoints(int client, int args)
 
 public Action Cmd_SoundCheck(int client, int args)
 {
-	ReplyToCommand(client, "[BM] sm_bm_sounds = %d", g_cvSounds.IntValue);
+	ReplyToCommand(client, "[BM] sm_bm_sounds = %d   precache buy=%s deny=%s",
+		g_cvSounds.IntValue, g_bPrecBuy ? "Y" : "N", g_bPrecDeny ? "Y" : "N");
 	CheckSoundFile(client, "sound/blackmarket/bm_buy.wav");
 	CheckSoundFile(client, "sound/blackmarket/bm_deny.wav");
 	return Plugin_Handled;
+}
+
+public Action Cmd_SoundTest(int client, int args)
+{
+	ReplyToCommand(client, "[BM] 开始三段对照测试……");
+	g_iSndTestCount[client] = 0;
+	CreateTimer(0.1, Timer_SndStage, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	return Plugin_Handled;
+}
+
+public Action Timer_SndStage(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client < 1 || !IsClientInGame(client))
+	{
+		return Plugin_Stop;
+	}
+
+	switch (g_iSndTestCount[client])
+	{
+		case 0:
+		{
+			PrintToChat(client, "%s 1/3 购买音 (soundscript · mp3)  v%s", BM_TAG, PLUGIN_VERSION);
+			EmitSoundToClient(client, "BlackMarket.Buy");
+		}
+		case 1:
+		{
+			PrintToChat(client, "%s 2/3 失败音 (soundscript · mp3)", BM_TAG);
+			EmitSoundToClient(client, "BlackMarket.Deny");
+		}
+		case 2:
+		{
+			PrintToChat(client, "%s 3/3 购买音 (play 命令 · mp3)", BM_TAG);
+			ClientCommand(client, "play blackmarket/bm_buy.mp3");
+		}
+		default:
+		{
+			return Plugin_Stop;
+		}
+	}
+
+	g_iSndTestCount[client]++;
+	if (g_iSndTestCount[client] < 3)
+	{
+		CreateTimer(1.8, Timer_SndStage, userid, TIMER_FLAG_NO_MAPCHANGE);
+	}
+	return Plugin_Stop;
 }
 
 void CheckSoundFile(int client, const char[] path)
@@ -1228,8 +1301,12 @@ public void OnMapStart()
 	// 自定义音效必须预缓存，否则 EmitSound 会被引擎静默丢弃
 	if (g_cvSounds.BoolValue)
 	{
-		PrecacheSound("blackmarket/bm_buy.wav", true);
-		PrecacheSound("blackmarket/bm_deny.wav", true);
+		g_bPrecBuy  = PrecacheSound("BlackMarket.Buy", true);
+		g_bPrecDeny = PrecacheSound("BlackMarket.Deny", true);
+
+		// 联机时让没订阅工坊包的客户端也能拿到文件
+		AddFileToDownloadsTable("sound/blackmarket/bm_buy.wav");
+		AddFileToDownloadsTable("sound/blackmarket/bm_deny.wav");
 	}
 
 	if (g_iShopCount >= 2)
@@ -1447,7 +1524,7 @@ void TryUpgradeAttr(int client, int attr)
 	if (g_iPoints[client] < price)
 	{
 		PrintToChat(client, "%s 补给点不够：升级需要 \x04%d\x01，你有 %d", BM_TAG, price, g_iPoints[client]);
-		PlayClientSound(client, "blackmarket/bm_deny.wav");
+		PlayClientSound(client, "BlackMarket.Deny", "blackmarket/bm_deny.mp3");
 		ReopenMenu(client, -2);
 		return;
 	}
@@ -1470,7 +1547,7 @@ void TryUpgradeAttr(int client, int attr)
 	PrintToChat(client, "%s \x04%s\x01 升到 Lv.%d，花费 %d，剩余 %d",
 		BM_TAG, name, lvl + 1, price, g_iPoints[client]);
 	PrintHintText(client, "属性：%s Lv.%d", name, lvl + 1);
-	PlayClientSound(client, "blackmarket/bm_buy.wav");
+	PlayClientSound(client, "BlackMarket.Buy", "blackmarket/bm_buy.mp3");
 
 	ApplyAttrs(client);
 	SaveAttrs(client);

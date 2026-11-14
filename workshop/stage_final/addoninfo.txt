@@ -1,0 +1,9 @@
+"AddonInfo"
+{
+	"addontitle"		"黑市 Black Market · 提示音包"
+	"addonversion"		"1.3"
+	"addontagline"		"为服务器插件「黑市」准备的买卖提示音"
+	"addonauthor"		"night080318"
+	"addondescription"	"两种短提示音：购买成功、补给点不足。\n\n【重要】这是服务器端插件 Black Market 的配套资源。只有当你连的服务器装了该插件时才会响，在没装插件的服务器里不会有任何效果，也不改变任何游戏平衡。\n\n插件与源码：\ngithub.com/night080318/l4d2-black-market"
+	"addonlog"			"v1.3 — 移除连杀提示音，保留买卖两种"
+}
