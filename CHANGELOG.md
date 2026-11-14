@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.7 — 2026-11-14
+
+### 修复
+- **音效不响**。L4D2 的自定义音效必须先 `PrecacheSound`，否则 `EmitSoundToClient` 会被引擎静默丢弃（没有报错、没有日志）。现在 `OnMapStart` 里预缓存两个 wav，受 `sm_bm_sounds` 控制。
+
+### 新增
+- **`!bm_sndcheck` / `sm_bm_sndcheck`**：打印两个音效文件在「磁盘」和「引擎文件系统（含附加内容 VPK）」里的可见性、以及文件大小。用来区分两种情况：
+  - `engine=N` → VPK 没挂载，文件根本不存在
+  - `engine=Y size=48554` → 文件在，问题在播放环节
+
 ## 1.3.6 — 2026-11-14
 
 ### 变更

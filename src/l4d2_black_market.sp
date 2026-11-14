@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.6"
+#define PLUGIN_VERSION  "1.3.7"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -162,6 +162,7 @@ void RegisterCommands()
 	RegConsoleCmd("sm_bm_add", Cmd_CheatAdd, "给自己加/减补给点，例: !bmadd 500");
 	RegConsoleCmd("sm_bmadd",  Cmd_CheatAdd, "同上（聊天框 !bmadd 会映射到这个名字）");
 	RegConsoleCmd("sm_bmzero", Cmd_ZeroPoints, "把自己的补给点清零");
+	RegConsoleCmd("sm_bm_sndcheck", Cmd_SoundCheck, "检查音效文件是否被游戏读到");
 	RegConsoleCmd("sm_cheat",  Cmd_Cheat,    "开关自动补给点（花多少自动补满）");
 
 	RegAdminCmd("sm_bm_give",     Cmd_AdminGive, ADMFLAG_CHEATS, "sm_bm_give <目标> <数量>  发补给点");
@@ -859,6 +860,24 @@ public Action Cmd_ZeroPoints(int client, int args)
 	return Plugin_Handled;
 }
 
+public Action Cmd_SoundCheck(int client, int args)
+{
+	ReplyToCommand(client, "[BM] sm_bm_sounds = %d", g_cvSounds.IntValue);
+	CheckSoundFile(client, "sound/blackmarket/bm_buy.wav");
+	CheckSoundFile(client, "sound/blackmarket/bm_deny.wav");
+	return Plugin_Handled;
+}
+
+void CheckSoundFile(int client, const char[] path)
+{
+	bool onDisk = FileExists(path);
+	bool inVfs  = FileExists(path, true);
+	int  size   = FileSize(path, true);
+
+	ReplyToCommand(client, "[BM] %s  disk=%s engine=%s size=%d",
+		path, onDisk ? "Y" : "N", inVfs ? "Y" : "N", size);
+}
+
 public Action Cmd_CheatAdd(int client, int args)
 {
 	if (!client || !IsClientInGame(client))
@@ -1205,6 +1224,13 @@ public void OnMapStart()
 	g_iSale[0] = -1;
 	g_iSale[1] = -1;
 	g_bChapterPaid = false;
+
+	// 自定义音效必须预缓存，否则 EmitSound 会被引擎静默丢弃
+	if (g_cvSounds.BoolValue)
+	{
+		PrecacheSound("blackmarket/bm_buy.wav", true);
+		PrecacheSound("blackmarket/bm_deny.wav", true);
+	}
 
 	if (g_iShopCount >= 2)
 	{
