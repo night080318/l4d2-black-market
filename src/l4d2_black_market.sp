@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.5"
+#define PLUGIN_VERSION  "1.3.6"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -289,15 +289,6 @@ void PlayClientSound(int client, const char[] file)
 	EmitSoundToClient(client, file);
 }
 
-void PlayGlobalSound(const char[] file)
-{
-	if (!g_cvSounds.BoolValue)
-	{
-		return;
-	}
-	EmitSoundToAll(file);
-}
-
 /* ============================================================
  *  事件
  * ============================================================ */
@@ -399,7 +390,6 @@ void HandleStreak(int client)
 		int scaled = ScaledPoints(bonus);
 		AwardPoints(client, scaled, "连杀奖励", false);
 		PrintToChatAll("%s \x04%N\x01 达成 \x04%d 连杀\x01！额外 +%d 补给点", BM_TAG, client, streak, scaled);
-		PlayGlobalSound("blackmarket/bm_streak.wav");
 	}
 }
 
