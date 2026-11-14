@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.2"
+#define PLUGIN_VERSION  "1.3.3"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -658,6 +658,49 @@ public int MenuHandler_Category(Menu menu, MenuAction action, int param1, int pa
 	return 0;
 }
 
+/* 菜单选中后引擎会立刻关掉它，此时同步 Display 有概率被吞。
+   统一延迟一拍再开：cat < 0 表示回商店主界面。 */
+void ReopenMenu(int client, int cat)
+{
+	if (client < 1 || !IsClientInGame(client))
+	{
+		return;
+	}
+
+	DataPack dp = new DataPack();
+	dp.WriteCell(GetClientUserId(client));
+	dp.WriteCell(cat);
+	CreateTimer(0.1, Timer_ReopenMenu, dp, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_ReopenMenu(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	int cat = dp.ReadCell();
+	delete dp;
+
+	int client = GetClientOfUserId(userid);
+	if (client < 1 || !IsClientInGame(client) || IsFakeClient(client))
+	{
+		return Plugin_Stop;
+	}
+
+	if (cat == -1)
+	{
+		ShowMainMenu(client);
+	}
+	else if (cat == -2)
+	{
+		ShowAttrMenu(client);
+	}
+	else if (cat >= 0)
+	{
+		ShowCategoryMenu(client, cat);
+	}
+	return Plugin_Stop;
+}
+
 void TryBuy(int client, int idx)
 {
 	if (idx < 0 || idx >= g_iShopCount)
@@ -676,13 +719,14 @@ void TryBuy(int client, int idx)
 		PrintToChat(client, "%s 补给点不够：%s 需要 \x04%d\x01，你只有 %d",
 			BM_TAG, g_eShop[idx].name, price, g_iPoints[client]);
 		PlayClientSound(client, "blackmarket/bm_deny.wav");
-		ShowCategoryMenu(client, g_eShop[idx].cat);
+		ReopenMenu(client, -1);
 		return;
 	}
 
 	if (!IsPlayerAlive(client))
 	{
 		PrintToChat(client, "%s 死了买不了东西，先让队友把你拉起来", BM_TAG);
+		ReopenMenu(client, -1);
 		return;
 	}
 
@@ -694,6 +738,7 @@ void TryBuy(int client, int idx)
 	{
 		PrintToChat(client, "%s 发放失败（可能背包已满），没扣你的点", BM_TAG);
 		LogError("[BlackMarket] GivePlayerItem 失败: client=%L item=%s", client, cls);
+		ReopenMenu(client, -1);
 		return;
 	}
 
@@ -718,7 +763,7 @@ void TryBuy(int client, int idx)
 		PrintToChatAll("%s \x04%N\x01 抢走了特价商品 \x04%s\x01！", BM_TAG, client, g_eShop[idx].name);
 	}
 
-	ShowCategoryMenu(client, g_eShop[idx].cat);
+	ReopenMenu(client, g_eShop[idx].cat);
 }
 
 int CountInCat(int cat)
@@ -1356,6 +1401,7 @@ void TryUpgradeAttr(int client, int attr)
 	if (lvl >= ATTR_LV_MAX)
 	{
 		PrintToChat(client, "%s 这一项已经满级了", BM_TAG);
+		ReopenMenu(client, -2);
 		return;
 	}
 
@@ -1364,7 +1410,7 @@ void TryUpgradeAttr(int client, int attr)
 	{
 		PrintToChat(client, "%s 补给点不够：升级需要 \x04%d\x01，你有 %d", BM_TAG, price, g_iPoints[client]);
 		PlayClientSound(client, "blackmarket/bm_deny.wav");
-		ShowAttrMenu(client);
+		ReopenMenu(client, -2);
 		return;
 	}
 
@@ -1391,7 +1437,7 @@ void TryUpgradeAttr(int client, int attr)
 	ApplyAttrs(client);
 	SaveAttrs(client);
 
-	ShowAttrMenu(client);
+	ReopenMenu(client, -2);
 }
 
 /* ---------- 效果 ---------- */
