@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.3.3"
+#define PLUGIN_VERSION  "1.3.4"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -160,6 +160,7 @@ void RegisterCommands()
 
 	// 本地开服用的作弊命令（受 sm_bm_cheat_enabled 控制）
 	RegConsoleCmd("sm_bm_add", Cmd_CheatAdd, "给自己加/减补给点，例: !bmadd 500");
+	RegConsoleCmd("sm_bmadd",  Cmd_CheatAdd, "同上（聊天框 !bmadd 会映射到这个名字）");
 	RegConsoleCmd("sm_cheat",  Cmd_Cheat,    "开关自动补给点（花多少自动补满）");
 
 	RegAdminCmd("sm_bm_give",     Cmd_AdminGive, ADMFLAG_CHEATS, "sm_bm_give <目标> <数量>  发补给点");
