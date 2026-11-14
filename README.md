@@ -4,8 +4,8 @@
 
 A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn points, spend them at `!shop`. Persists across maps via SQLite.
 
-![version](https://img.shields.io/badge/version-1.1.0-blue)
-![sourcemod](https://img.shields.io/badge/SourceMod-1.11%2B-orange)
+![version](https://img.shields.io/badge/version-1.4.2-blue)
+![sourcemod](https://img.shields.io/badge/SourceMod-1.12%2B-orange)
 ![game](https://img.shields.io/badge/game-L4D2-red)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -29,12 +29,13 @@ A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn poin
 - **排行榜** `!top`、**个人数据** `!pts`
 - **作弊**：`!cheat` 花多少补回多少，`!bmadd 500` 直接加（可关）
 - **属性强化**：`!attr` 用补给点强化 火力 / 近战 / 投掷 / 换弹 / 移速，每项 3 级，**通关后自动清零**
+- **提示音**：购买成功 / 点数不足两声，来自配套创意工坊音效包（可选，不订阅就静音）
 
 ### 前置
 
 - Left 4 Dead 2
 - MetaMod:Source 1.11+
-- SourceMod 1.11+（1.12 上验证编译）
+- SourceMod 1.12+（在 1.12.0.7259 上编译验证）
 
 ### 安装
 
@@ -46,8 +47,8 @@ A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn poin
 
 ### 配套资源
 
-- **一键安装包** `BlackMarket_Installer_v1.3.2.zip` —— 双击自动找游戏目录、装好 MetaMod + SourceMod + 插件，适合不想手动折腾的朋友
-- **创意工坊音效包** —— 订阅后在装了本插件的服务器里会有购买成功 / 补点不足两种提示音；没订阅也能正常玩，只是没声音
+- **一键安装包** `BlackMarket_Installer_v1.4.2.zip` —— 双击自动找游戏目录、装好 MetaMod + SourceMod + 插件，适合不想手动折腾的朋友
+- **创意工坊音效包** `Black Market Sound Pack` —— 订阅后在装了本插件的服务器里会有购买成功 / 补点不足两种提示音；没订阅也能正常玩，只是没声音（**每位玩家都要自己订阅**）
 
 ### 命令
 
@@ -112,13 +113,15 @@ kill special infected to earn points, spend them on supplies, upgrades and weapo
 - **Daily deals**: 2 random items at 50% off each map
 - **Persistence**: SQLite, keyed by SteamID64
 - **Leaderboard** `!top`, personal stats `!pts`
+- **Attributes**: `!attr` — damage / melee / throw speed / reload / movement, 3 levels each, reset when the campaign ends
+- **Sounds**: buy / deny cues from the companion Workshop sound pack (optional — silent if not subscribed)
 - **Cheats**: `!cheat`, `!bmadd <n>` (can be disabled)
 
 ### Requirements
 
 - Left 4 Dead 2
 - MetaMod:Source 1.11+
-- SourceMod 1.11+
+- SourceMod 1.12+ (built and tested on 1.12.0.7259)
 
 ### Install
 
