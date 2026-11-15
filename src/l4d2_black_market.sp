@@ -2109,7 +2109,6 @@ void ShowTestMenu(int client)
 	menu.AddItem("refund", "撤销加点（按原价退还全部已花点数）");
 	menu.AddItem("speed",  "速度 / 体能调试");
 	menu.AddItem("dmg",    "伤害诊断（火力 / 近战）");
-	menu.AddItem("wpn",    "武器属性诊断（换弹用）");
 	menu.AddItem("killbots", "杀死所有人机队友");
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
@@ -2141,11 +2140,6 @@ public int MenuHandler_Test(Menu menu, MenuAction action, int param1, int param2
 			else if (StrEqual(info, "speed"))
 			{
 				ShowSpeedTestMenu(param1);
-			}
-			else if (StrEqual(info, "wpn"))
-			{
-				PrintWeaponDiag(param1);
-				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
 			}
 			else if (StrEqual(info, "dmg"))
 			{
@@ -2411,33 +2405,6 @@ void PrintSpeedDiag(int client)
 	PrintToChat(client, "当前 Lagged=%.2f ｜ Maxspeed=%.0f", lagged, maxspd);
 }
 
-void PrintWeaponDiag(int client)
-{
-	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-	if (weapon <= 0 || !IsValidEntity(weapon))
-	{
-		PrintToChat(client, "%s 手上没有武器", BM_TAG);
-		return;
-	}
-
-	char cls[64];
-	char netcls[64];
-	GetEntityClassname(weapon, cls, sizeof(cls));
-	GetEntityNetClass(weapon, netcls, sizeof(netcls));
-
-	PrintToChat(client, "%s 武器诊断", BM_TAG);
-	PrintToChat(client, "classname=%s  网络类=%s", cls, netcls);
-
-	PrintToChat(client, "reloadStart=%s  reloadInsert=%s  reloadEnd=%s",
-		HasEntProp(weapon, Prop_Send, "m_reloadStartDuration") ? "有" : "无",
-		HasEntProp(weapon, Prop_Send, "m_reloadInsertDuration") ? "有" : "无",
-		HasEntProp(weapon, Prop_Send, "m_reloadEndDuration") ? "有" : "无");
-
-	PrintToChat(client, "reloadState=%s  playbackRate=%s  nextPrimary=%s",
-		HasEntProp(weapon, Prop_Send, "m_reloadState") ? "有" : "无",
-		HasEntProp(weapon, Prop_Send, "m_flPlaybackRate") ? "有" : "无",
-		HasEntProp(weapon, Prop_Send, "m_flNextPrimaryAttack") ? "有" : "无");
-}
 
 void PrintDmgDiag(int client)
 {
