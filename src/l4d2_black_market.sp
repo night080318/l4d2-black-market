@@ -19,7 +19,7 @@
 #include <dbi>
 
 
-#define PLUGIN_VERSION  "1.4.4"
+#define PLUGIN_VERSION  "1.4.5"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -87,6 +87,7 @@ ConVar   g_cvReloadFloor;     // 换弹强化：换弹时间倍率下限
 ConVar   g_cvSniperBolt;      // 狙击枪拉栓（射击间隔）是否吃换弹强化
 ConVar   g_cvSniperAnim;      // 狙击枪拉栓动画是否同步加速
 ConVar   g_cvSniperFloor;     // 狙击枪射击间隔倍率下限
+ConVar   g_cvAutoBind;       // 玩家进服时自动把 B 键绑到商店
 ConVar   g_cvDmgStep;         // 火力强化：每级提升比例
 ConVar   g_cvMeleeStep;       // 近战强化：每级提升比例
 ConVar   g_cvSpeedStep;       // 体能强化：每级提升比例
@@ -152,6 +153,7 @@ public void OnPluginStart()
 	g_cvSniperAnim   = CreateConVar("sm_bm_attr_sniper_anim",  "0",    "1=拉栓动画同步加速（会让开火动画重播、多掉弹壳，默认关）", _, true, 0.0, true, 1.0);
 	g_cvSniperFloor  = CreateConVar("sm_bm_attr_sniper_floor", "0.60", "狙击枪射击间隔的倍率下限（0.60 = 最快只剩 60%）", _, true, 0.30, true, 0.95);
 	g_cvGrenadeMult  = CreateConVar("sm_bm_attr_gl_mult",      "0.85", "榴弹发射器换弹在强化基础上再乘这个值（0.85 = 再快 15%）", _, true, 0.50, true, 1.0);
+	g_cvAutoBind     = CreateConVar("sm_bm_autobind",        "1",    "1=玩家进服时自动把 B 键绑到 !shop（0=不碰玩家按键）", _, true, 0.0, true, 1.0);
 	g_cvDmgStep      = CreateConVar("sm_bm_attr_dmg_step",     "0.10", "火力强化每级提升的枪械伤害比例（0.10 = 每级 +10%，三级 +30%）", _, true, 0.01, true, 0.50);
 	g_cvMeleeStep    = CreateConVar("sm_bm_attr_melee_step",   "0.18", "近战强化每级提升的近战伤害比例（0.18 = 每级 +18%，三级 +54%）", _, true, 0.01, true, 1.00);
 	g_cvSpeedStep    = CreateConVar("sm_bm_attr_speed_step",   "0.10", "体能强化每级提升的移动速度比例（0.10 = 每级 +10%，三级 +30%）", _, true, 0.01, true, 0.30);
@@ -1318,6 +1320,25 @@ public void OnClientPostAdminCheck(int client)
 		return;
 	}
 	LoadPlayer(client);
+
+	// 等客户端完全就绪再发 bind（引擎允许服务器代发 bind，但命令要用 "say !shop" 这种可执行写法）
+	if (g_cvAutoBind.BoolValue)
+	{
+		CreateTimer(2.0, Timer_AutoBind, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	}
+}
+
+public Action Timer_AutoBind(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client))
+	{
+		return Plugin_Stop;
+	}
+
+	ClientCommand(client, "bind b \"say !shop\"");
+	PrintToChat(client, "%s 已把 \x04B 键\x01 绑定为打开商店（聊天框 \x04!shop\x01 也可以用）", BM_TAG);
+	return Plugin_Stop;
 }
 
 public void OnClientDisconnect(int client)
