@@ -18,7 +18,8 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.4.3"
+
+#define PLUGIN_VERSION  "1.4.4"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -86,6 +87,14 @@ ConVar   g_cvReloadFloor;     // 换弹强化：换弹时间倍率下限
 ConVar   g_cvSniperBolt;      // 狙击枪拉栓（射击间隔）是否吃换弹强化
 ConVar   g_cvSniperAnim;      // 狙击枪拉栓动画是否同步加速
 ConVar   g_cvSniperFloor;     // 狙击枪射击间隔倍率下限
+ConVar   g_cvDmgStep;         // 火力强化：每级提升比例
+ConVar   g_cvMeleeStep;       // 近战强化：每级提升比例
+ConVar   g_cvSpeedStep;       // 体能强化：每级提升比例
+float    g_fSpeedForce[MAXPLAYERS + 1];   // 调试：只对下命令的这个人生效的强制移速
+int      g_iDmgSeen[MAXPLAYERS + 1];      // 伤害诊断：作为攻击者进入回调的次数
+int      g_iDmgBoosted[MAXPLAYERS + 1];   // 伤害诊断：真正加了成的次数
+char     g_sDmgWeapon[MAXPLAYERS + 1][48];// 伤害诊断：最近一次造成伤害的武器
+float    g_fDmgMult[MAXPLAYERS + 1];      // 伤害诊断：最近一次的加成倍率
 ConVar   g_cvGrenadeMult;     // 榴弹发射器换弹额外倍率
 int      g_iViewModelO  = -1; // CTerrorPlayer::m_hViewModel
 int      g_iVMStartTimeO = -1;// CTerrorViewModel::m_flLayerStartTime
@@ -143,6 +152,9 @@ public void OnPluginStart()
 	g_cvSniperAnim   = CreateConVar("sm_bm_attr_sniper_anim",  "0",    "1=拉栓动画同步加速（会让开火动画重播、多掉弹壳，默认关）", _, true, 0.0, true, 1.0);
 	g_cvSniperFloor  = CreateConVar("sm_bm_attr_sniper_floor", "0.60", "狙击枪射击间隔的倍率下限（0.60 = 最快只剩 60%）", _, true, 0.30, true, 0.95);
 	g_cvGrenadeMult  = CreateConVar("sm_bm_attr_gl_mult",      "0.85", "榴弹发射器换弹在强化基础上再乘这个值（0.85 = 再快 15%）", _, true, 0.50, true, 1.0);
+	g_cvDmgStep      = CreateConVar("sm_bm_attr_dmg_step",     "0.10", "火力强化每级提升的枪械伤害比例（0.10 = 每级 +10%，三级 +30%）", _, true, 0.01, true, 0.50);
+	g_cvMeleeStep    = CreateConVar("sm_bm_attr_melee_step",   "0.18", "近战强化每级提升的近战伤害比例（0.18 = 每级 +18%，三级 +54%）", _, true, 0.01, true, 1.00);
+	g_cvSpeedStep    = CreateConVar("sm_bm_attr_speed_step",   "0.10", "体能强化每级提升的移动速度比例（0.10 = 每级 +10%，三级 +30%）", _, true, 0.01, true, 0.30);
 
 	LoadShopTable();
 	HookGameEvents();
@@ -1444,15 +1456,25 @@ void AttrEffectText(int attr, char[] buf, int maxlen)
 {
 	switch (attr)
 	{
-		case ATTR_DMG:    strcopy(buf, maxlen, "枪械伤害 +8%/级");
-		case ATTR_MELEE:  strcopy(buf, maxlen, "近战伤害 +15%/级");
+		case ATTR_DMG:
+		{
+			Format(buf, maxlen, "枪械伤害 +%d%%/级", RoundToNearest(g_cvDmgStep.FloatValue * 100.0));
+		}
+		case ATTR_MELEE:
+		{
+			Format(buf, maxlen, "近战伤害 +%d%%/级", RoundToNearest(g_cvMeleeStep.FloatValue * 100.0));
+		}
 		case ATTR_THROW:  strcopy(buf, maxlen, "投掷初速 +22%/级");
 		case ATTR_RELOAD:
 		{
 			int pct = RoundToNearest(g_cvReloadStep.FloatValue * 100.0);
 			Format(buf, maxlen, "换弹 -%d%%/级", pct);
 		}
-		case ATTR_SPD:    strcopy(buf, maxlen, "移动速度 +5%/级");
+		case ATTR_SPD:
+		{
+			int pct = RoundToNearest(g_cvSpeedStep.FloatValue * 100.0);
+			Format(buf, maxlen, "移动速度 +%d%%/级", pct);
+		}
 		default:          strcopy(buf, maxlen, "");
 	}
 }
@@ -1622,6 +1644,9 @@ void ShowTestMenu(int client)
 		g_iAttr[client][ATTR_SPD]);
 
 	menu.AddItem("refund", "撤销加点（按原价退还全部已花点数）");
+	menu.AddItem("speed",  "速度 / 体能调试");
+	menu.AddItem("dmg",    "伤害诊断（火力 / 近战）");
+	menu.AddItem("killbots", "杀死所有人机队友");
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
 }
@@ -1649,6 +1674,102 @@ public int MenuHandler_Test(Menu menu, MenuAction action, int param1, int param2
 				}
 				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
 			}
+			else if (StrEqual(info, "speed"))
+			{
+				ShowSpeedTestMenu(param1);
+			}
+			else if (StrEqual(info, "dmg"))
+			{
+				PrintDmgDiag(param1);
+				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
+			}
+			else if (StrEqual(info, "killbots"))
+			{
+				KillBotTeammates(param1);
+				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
+			}
+		}
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+	}
+	return 0;
+}
+
+void KillBotTeammates(int client)
+{
+	int killed = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
+		{
+			ForcePlayerSuicide(i);
+			killed++;
+		}
+	}
+
+	PrintToChat(client, "%s 已处决 %d 个人机队友", BM_TAG, killed);
+}
+
+void ShowSpeedTestMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_TestSpeed);
+
+	float lagged = GetEntPropFloat(client, Prop_Send, "m_flLaggedMovementValue");
+
+	menu.SetTitle("速度调试（只影响自己）\n体能 Lv.%d ｜ 当前倍率 %.2f ｜ 强制 %.0f",
+		g_iAttr[client][ATTR_SPD], lagged, g_fSpeedForce[client]);
+
+	menu.AddItem("diag", "打印诊断信息");
+	menu.AddItem("f600", "强制移速 600");
+	menu.AddItem("f440", "强制移速 440");
+	menu.AddItem("f330", "强制移速 330");
+	menu.AddItem("f0",   "关闭强制移速");
+	menu.ExitButton = true;
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_TestSpeed(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[16];
+			menu.GetItem(param2, info, sizeof(info));
+
+			if (StrEqual(info, "diag"))
+			{
+				PrintSpeedDiag(param1);
+			}
+			else if (StrEqual(info, "f600"))
+			{
+				ApplySpeedForce(param1, 600.0);
+			}
+			else if (StrEqual(info, "f440"))
+			{
+				ApplySpeedForce(param1, 440.0);
+			}
+			else if (StrEqual(info, "f330"))
+			{
+				ApplySpeedForce(param1, 330.0);
+			}
+			else if (StrEqual(info, "f0"))
+			{
+				ApplySpeedForce(param1, 0.0);
+			}
+
+			CreateTimer(0.1, Timer_ReopenSpeedMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				ShowTestMenu(param1);
+			}
 		}
 		case MenuAction_End:
 		{
@@ -1664,6 +1785,16 @@ public Action Timer_ReopenTestMenu(Handle timer, any userid)
 	if (client > 0 && IsClientInGame(client))
 	{
 		ShowTestMenu(client);
+	}
+	return Plugin_Stop;
+}
+
+public Action Timer_ReopenSpeedMenu(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client > 0 && IsClientInGame(client))
+	{
+		ShowSpeedTestMenu(client);
 	}
 	return Plugin_Stop;
 }
@@ -1699,6 +1830,30 @@ int RefundAllAttrs(int client)
 
 /* ---------- 效果 ---------- */
 
+#define SURVIVOR_BASE_SPEED 220.0
+
+/* 体能强化（无依赖实现）。
+ * 实测：写 m_flMaxspeed（datamap / send）在 L4D2 里不生效。
+ * 改用 m_flLaggedMovementValue —— 移动速度倍率，L4D2 的速度类插件基本都用这个字段。
+ * 已知副作用：倍率同时作用于跳跃，调高后跳跃手感会变。
+ */
+void SetPlayerSpeed(int client, float target)
+{
+	float mult = target / SURVIVOR_BASE_SPEED;
+
+	if (HasEntProp(client, Prop_Send, "m_flLaggedMovementValue"))
+	{
+		SetEntPropFloat(client, Prop_Send, "m_flLaggedMovementValue", mult);
+	}
+
+	// 顺手也写一份 maxspeed，引擎若认这个字段也能生效
+	SetEntPropFloat(client, Prop_Data, "m_flMaxspeed", target);
+	if (HasEntProp(client, Prop_Send, "m_flMaxspeed"))
+	{
+		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", target);
+	}
+}
+
 void ApplyAttrs(int client)
 {
 	if (client < 1 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
@@ -1712,8 +1867,119 @@ void ApplyAttrs(int client)
 		lvl = ATTR_LV_MAX;
 	}
 
-	SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", 220.0 * (1.0 + 0.05 * lvl));
+	if (lvl <= 0)
+	{
+		SetPlayerSpeed(client, SURVIVOR_BASE_SPEED);
+		return;
+	}
+
+	SetPlayerSpeed(client, SURVIVOR_BASE_SPEED * (1.0 + g_cvSpeedStep.FloatValue * float(lvl)));
 }
+
+// 每帧兜底：游戏把倍率改回 1.0 时补回来（只在“正常状态”下补，不覆盖肾上腺素等特殊状态）
+void MaintainSpeedAttr()
+{
+	if (!g_cvAttrs.BoolValue || !g_cvEnabled.BoolValue)
+	{
+		return;
+	}
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || IsFakeClient(i) || !IsPlayerAlive(i))
+		{
+			continue;
+		}
+
+		// 调试：只影响下命令的那个人
+		if (g_fSpeedForce[i] > 1.0)
+		{
+			float wantForce = g_fSpeedForce[i] / SURVIVOR_BASE_SPEED;
+			float curForce = GetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue");
+			if (curForce < wantForce - 0.02 || curForce > wantForce + 0.02)
+			{
+				SetPlayerSpeed(i, g_fSpeedForce[i]);
+			}
+			continue;
+		}
+
+		int lvl = g_iAttr[i][ATTR_SPD];
+		if (lvl <= 0)
+		{
+			continue;
+		}
+		if (lvl > ATTR_LV_MAX)
+		{
+			lvl = ATTR_LV_MAX;
+		}
+
+		float mult = 1.0 + g_cvSpeedStep.FloatValue * float(lvl);
+		float cur = GetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue");
+
+		// 只补“被游戏重置回 1.0”的情况；其它值（肾上腺素 1.3 等）不覆盖
+		if (cur > 0.98 && cur < 1.02)
+		{
+			SetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue", mult);
+			SetEntPropFloat(i, Prop_Data, "m_flMaxspeed", SURVIVOR_BASE_SPEED * mult);
+			if (HasEntProp(i, Prop_Send, "m_flMaxspeed"))
+			{
+				SetEntPropFloat(i, Prop_Send, "m_flMaxspeed", SURVIVOR_BASE_SPEED * mult);
+			}
+		}
+	}
+}
+
+void PrintSpeedDiag(int client)
+{
+	int lvl = g_iAttr[client][ATTR_SPD];
+	float target = SURVIVOR_BASE_SPEED * (1.0 + g_cvSpeedStep.FloatValue * float(lvl));
+	float lagged = GetEntPropFloat(client, Prop_Send, "m_flLaggedMovementValue");
+	float maxspd = GetEntPropFloat(client, Prop_Data, "m_flMaxspeed");
+
+	PrintToChat(client, "%s 诊断 v%s", BM_TAG, PLUGIN_VERSION);
+	PrintToChat(client, "体能 Lv.%d ｜ step=%.2f 目标跑速=%.1f ｜ force=%.0f",
+		lvl, g_cvSpeedStep.FloatValue, target, g_fSpeedForce[client]);
+	PrintToChat(client, "当前 Lagged=%.2f ｜ Maxspeed=%.0f", lagged, maxspd);
+}
+
+void PrintDmgDiag(int client)
+{
+	PrintToChat(client, "%s 伤害诊断 v%s", BM_TAG, PLUGIN_VERSION);
+	PrintToChat(client, "火力 Lv.%d ｜ 近战 Lv.%d ｜ 最近武器 %s",
+		g_iAttr[client][ATTR_DMG], g_iAttr[client][ATTR_MELEE],
+		g_sDmgWeapon[client][0] ? g_sDmgWeapon[client] : "（还没有记录）");
+	PrintToChat(client, "伤害回调 %d 次 ｜ 实际加成 %d 次 ｜ 最近倍率 x%.2f",
+		g_iDmgSeen[client], g_iDmgBoosted[client], g_fDmgMult[client]);
+}
+
+void ApplySpeedForce(int client, float value)
+{
+	g_fSpeedForce[client] = value;
+
+	if (value > 1.0)
+	{
+		if (IsPlayerAlive(client))
+		{
+			SetPlayerSpeed(client, value);
+		}
+		PrintToChat(client, "%s 强制移速 = %.0f（只影响你自己）", BM_TAG, value);
+		return;
+	}
+
+	int lvl = g_iAttr[client][ATTR_SPD];
+	if (lvl > ATTR_LV_MAX)
+	{
+		lvl = ATTR_LV_MAX;
+	}
+
+	float normal = SURVIVOR_BASE_SPEED * (1.0 + g_cvSpeedStep.FloatValue * float(lvl));
+	if (IsPlayerAlive(client))
+	{
+		SetPlayerSpeed(client, normal);
+	}
+	PrintToChat(client, "%s 已关闭强制移速，恢复为 %.0f", BM_TAG, normal);
+}
+
 
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
@@ -1927,6 +2193,8 @@ void RestoreWeaponPlayback(int weapon)
 
 public void OnGameFrame()
 {
+	MaintainSpeedAttr();
+
 	if (!g_cvAttrs.BoolValue || !g_cvEnabled.BoolValue || !g_cvSniperBolt.BoolValue)
 	{
 		return;
@@ -2148,7 +2416,8 @@ public Action Timer_ShotgunReloadWatch(Handle timer, DataPack dp)
 
 public void OnEntityCreated(int entity, const char[] classname)
 {
-	if (StrEqual(classname, "infected"))
+	// 普通僵尸是 infected；Witch 是 witch。特感 / Tank 走 OnClientPutInServer 里的玩家钩子。
+	if (StrEqual(classname, "infected") || StrEqual(classname, "witch"))
 	{
 		SDKHook(entity, SDKHook_OnTakeDamage, OnInfectedDamage);
 		return;
@@ -2359,6 +2628,10 @@ Action ApplyDamageBonus(int attacker, float &damage)
 
 	bool isMelee = (StrContains(weapon, "melee") != -1) || StrEqual(weapon, "weapon_chainsaw");
 
+	// 诊断计数：能看到回调有没有进来、武器识别对不对
+	g_iDmgSeen[attacker]++;
+	strcopy(g_sDmgWeapon[attacker], sizeof(g_sDmgWeapon[]), weapon);
+
 	if (isMelee)
 	{
 		int lvl = g_iAttr[attacker][ATTR_MELEE];
@@ -2366,16 +2639,21 @@ Action ApplyDamageBonus(int attacker, float &damage)
 		{
 			return Plugin_Continue;
 		}
-		damage *= (1.0 + 0.15 * lvl);
-		return Plugin_Changed;
+		g_fDmgMult[attacker] = 1.0 + g_cvMeleeStep.FloatValue * float(lvl);
+	}
+	else
+	{
+		int lvl = g_iAttr[attacker][ATTR_DMG];
+		if (lvl <= 0)
+		{
+			return Plugin_Continue;
+		}
+		g_fDmgMult[attacker] = 1.0 + g_cvDmgStep.FloatValue * float(lvl);
 	}
 
-	int lvl = g_iAttr[attacker][ATTR_DMG];
-	if (lvl <= 0)
-	{
-		return Plugin_Continue;
-	}
-	damage *= (1.0 + 0.08 * lvl);
+	damage *= g_fDmgMult[attacker];
+	g_iDmgBoosted[attacker]++;
+
 	return Plugin_Changed;
 }
 
