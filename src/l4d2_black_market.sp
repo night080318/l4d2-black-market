@@ -19,9 +19,10 @@
 #include <dbi>
 
 
-#define PLUGIN_VERSION  "1.4.6"
+#define PLUGIN_VERSION  "1.4.7"
 #define BM_TAG          "\x04[黑市]\x01"
-#define MAX_SHOP_ITEMS  32
+#define MAX_SHOP_ITEMS  64
+#define SHOP_PER_PAGE   6
 #define ATTR_MAX        5
 #define ATTR_LV_MAX     3
 #define BM_MAX_ENT      2048
@@ -40,18 +41,35 @@ enum
 	CAT_SUPPLY = 0,     // 补给
 	CAT_THROW,          // 投掷物
 	CAT_UPGRADE,        // 弹药升级
-	CAT_WEAPON,         // 武器
+	CAT_WEAPON,         // 武器（常用，平铺一页）
+	CAT_MORE,           // 更多武器（全量，分层）
 	CAT_MAX
+};
+
+/* 武器子类：远程按枪种分，近战单独一类 */
+enum
+{
+	SUB_NONE = 0,
+	SUB_SMG,            // 冲锋枪
+	SUB_SHOTGUN,        // 霰弹枪
+	SUB_RIFLE,          // 步枪
+	SUB_SNIPER,         // 狙击枪
+	SUB_SPECIAL,        // 特殊武器
+	SUB_PISTOL,         // 手枪
+	SUB_MELEE,          // 近战武器
+	SUB_MAX
 };
 
 enum struct ShopEntry
 {
 	int  cat;
+	int  sub;
 	int  price;         // 基础价（再乘 sm_bm_price_mult）
 	char id[24];
 	char name[48];
 	char cls[48];
 	char note[64];
+	char melee[32];     // 非空表示近战武器，值 = 近战脚本名
 }
 
 ShopEntry g_eShop[MAX_SHOP_ITEMS];
@@ -86,12 +104,16 @@ ConVar   g_cvReloadStep;      // 换弹强化：每级减少的比例
 ConVar   g_cvReloadFloor;     // 换弹强化：换弹时间倍率下限
 ConVar   g_cvSniperBolt;      // 狙击枪拉栓（射击间隔）是否吃换弹强化
 ConVar   g_cvSniperAnim;      // 狙击枪拉栓动画是否同步加速
+ConVar   g_cvShotgunAnim;     // 散弹枪泵动动画是否同步加速
 ConVar   g_cvSniperFloor;     // 狙击枪射击间隔倍率下限
 ConVar   g_cvAutoBind;       // 玩家进服时自动把 B 键绑到商店
 ConVar   g_cvDmgStep;         // 火力强化：每级提升比例
 ConVar   g_cvMeleeStep;       // 近战强化：每级提升比例
 ConVar   g_cvSpeedStep;       // 体能强化：每级提升比例
-float    g_fSpeedForce[MAXPLAYERS + 1];   // 调试：只对下命令的这个人生效的强制移速
+float    g_fSpeedForce[MAXPLAYERS + 1];
+float    g_fShotBase[BM_MAX_ENT][3];      // 散弹枪三个换弹时长的原始值
+bool     g_bShotBase[BM_MAX_ENT];         // 上面那组原始值是否已记录
+int      g_iShotTicks[MAXPLAYERS + 1];    // 换弹加速的调试节流计数   // 调试：只对下命令的这个人生效的强制移速
 int      g_iDmgSeen[MAXPLAYERS + 1];      // 伤害诊断：作为攻击者进入回调的次数
 int      g_iDmgBoosted[MAXPLAYERS + 1];   // 伤害诊断：真正加了成的次数
 char     g_sDmgWeapon[MAXPLAYERS + 1][48];// 伤害诊断：最近一次造成伤害的武器
@@ -150,6 +172,7 @@ public void OnPluginStart()
 	g_cvReloadStep   = CreateConVar("sm_bm_attr_reload_step",  "0.20", "换弹强化每级减少的换弹时间比例（0.20 = 每级 -20%，三级 -60%）", _, true, 0.05, true, 0.45);
 	g_cvReloadFloor  = CreateConVar("sm_bm_attr_reload_floor", "0.30", "换弹时间倍率下限（0.30 = 最快只剩原时长的 30%）", _, true, 0.20, true, 0.90);
 	g_cvSniperBolt   = CreateConVar("sm_bm_attr_sniper_bolt",  "1",    "1=狙击枪的拉栓/射击间隔也吃换弹强化", _, true, 0.0, true, 1.0);
+	g_cvShotgunAnim  = CreateConVar("sm_bm_attr_shotgun_anim", "0",    "1=散弹枪泵动/上膛动画也加速（实验，可能引出双动画）", _, true, 0.0, true, 1.0);
 	g_cvSniperAnim   = CreateConVar("sm_bm_attr_sniper_anim",  "0",    "1=拉栓动画同步加速（会让开火动画重播、多掉弹壳，默认关）", _, true, 0.0, true, 1.0);
 	g_cvSniperFloor  = CreateConVar("sm_bm_attr_sniper_floor", "0.60", "狙击枪射击间隔的倍率下限（0.60 = 最快只剩 60%）", _, true, 0.30, true, 0.95);
 	g_cvGrenadeMult  = CreateConVar("sm_bm_attr_gl_mult",      "0.85", "榴弹发射器换弹在强化基础上再乘这个值（0.85 = 再快 15%）", _, true, 0.50, true, 1.0);
@@ -222,7 +245,7 @@ void RegisterCommands()
  *  商品表
  * ============================================================ */
 
-void AddShopItem(int cat, const char[] id, int price, const char[] name, const char[] cls, const char[] note)
+void AddShopItem(int cat, int sub, const char[] id, int price, const char[] name, const char[] cls, const char[] note, const char[] melee = "")
 {
 	if (g_iShopCount >= MAX_SHOP_ITEMS)
 	{
@@ -231,11 +254,13 @@ void AddShopItem(int cat, const char[] id, int price, const char[] name, const c
 
 	ShopEntry e;
 	e.cat   = cat;
+	e.sub   = sub;
 	e.price = price;
-	strcopy(e.id,   sizeof(e.id),   id);
-	strcopy(e.name, sizeof(e.name), name);
-	strcopy(e.cls,  sizeof(e.cls),  cls);
-	strcopy(e.note, sizeof(e.note), note);
+	strcopy(e.id,    sizeof(e.id),    id);
+	strcopy(e.name,  sizeof(e.name),  name);
+	strcopy(e.cls,   sizeof(e.cls),   cls);
+	strcopy(e.note,  sizeof(e.note),  note);
+	strcopy(e.melee, sizeof(e.melee), melee);
 
 	g_eShop[g_iShopCount] = e;
 	g_iShopCount++;
@@ -246,27 +271,72 @@ void LoadShopTable()
 	g_iShopCount = 0;
 
 	/* 补给 */
-	AddShopItem(CAT_SUPPLY, "medkit",   8,  "医疗包",     "weapon_first_aid_kit", "回满血，或救活队友");
-	AddShopItem(CAT_SUPPLY, "pills",    4,  "止痛药",     "weapon_pain_pills",    "临时血量");
-	AddShopItem(CAT_SUPPLY, "adren",    6,  "肾上腺素",   "weapon_adrenaline",    "加速 + 临时血量");
-	AddShopItem(CAT_SUPPLY, "defib",    14, "电击器",     "weapon_defibrillator", "把死掉的队友拉起来");
+	AddShopItem(CAT_SUPPLY, SUB_NONE, "medkit",   8,  "医疗包",     "weapon_first_aid_kit", "回满血，或救活队友");
+	AddShopItem(CAT_SUPPLY, SUB_NONE, "pills",    4,  "止痛药",     "weapon_pain_pills",    "临时血量");
+	AddShopItem(CAT_SUPPLY, SUB_NONE, "adren",    6,  "肾上腺素",   "weapon_adrenaline",    "加速 + 临时血量");
+	AddShopItem(CAT_SUPPLY, SUB_NONE, "defib",    14, "电击器",     "weapon_defibrillator", "把死掉的队友拉起来");
 
 	/* 投掷物 */
-	AddShopItem(CAT_THROW,  "pipe",     4,  "管状炸弹",   "weapon_pipe_bomb",     "引开尸潮");
-	AddShopItem(CAT_THROW,  "molotov",  4,  "燃烧瓶",     "weapon_molotov",       "封路清场");
-	AddShopItem(CAT_THROW,  "vomit",    4,  "胆汁瓶",     "weapon_vomitjar",      "把僵尸糊一脸");
+	AddShopItem(CAT_THROW, SUB_NONE, "pipe",     4,  "管状炸弹",   "weapon_pipe_bomb",     "引开尸潮");
+	AddShopItem(CAT_THROW, SUB_NONE, "molotov",  4,  "燃烧瓶",     "weapon_molotov",       "封路清场");
+	AddShopItem(CAT_THROW, SUB_NONE, "vomit",    4,  "胆汁瓶",     "weapon_vomitjar",      "把僵尸糊一脸");
 
 	/* 弹药升级 */
-	AddShopItem(CAT_UPGRADE, "incen",   6,  "燃烧弹升级", "upgrade_ammo_incendiary", "子弹点燃目标");
-	AddShopItem(CAT_UPGRADE, "explosive", 6, "高爆弹升级", "upgrade_ammo_explosive",  "子弹范围爆炸");
-	AddShopItem(CAT_UPGRADE, "laser",   6,  "激光瞄准",   "upgrade_laser_sight",     "腰射也能准");
+	AddShopItem(CAT_UPGRADE, SUB_NONE, "incen",     6, "燃烧弹升级", "upgrade_ammo_incendiary", "子弹点燃目标");
+	AddShopItem(CAT_UPGRADE, SUB_NONE, "explosive", 6, "高爆弹升级", "upgrade_ammo_explosive",  "子弹范围爆炸");
+	AddShopItem(CAT_UPGRADE, SUB_NONE, "laser",     6, "激光瞄准",   "upgrade_laser_sight",     "腰射也能准");
 
-	/* 武器 */
-	AddShopItem(CAT_WEAPON, "ak47",     10, "AK-47",      "weapon_rifle_ak47",    "高伤害步枪");
-	AddShopItem(CAT_WEAPON, "m16",      8,  "M16 步枪",   "weapon_rifle",         "稳定连射");
-	AddShopItem(CAT_WEAPON, "autoshot", 9,  "自动霰弹",   "weapon_autoshotgun",   "近距离清场");
-	AddShopItem(CAT_WEAPON, "hunting",  8,  "猎枪",       "weapon_hunting_rifle", "远距离点杀");
-	AddShopItem(CAT_WEAPON, "grenade",  16, "榴弹发射器", "weapon_grenade_launcher", "别对着墙打");
+	/* 武器（常用，平铺一页） */
+	AddShopItem(CAT_WEAPON, SUB_NONE, "ak47",     10, "AK-47",      "weapon_rifle_ak47",    "高伤害步枪");
+	AddShopItem(CAT_WEAPON, SUB_NONE, "m16",      8,  "M16 步枪",   "weapon_rifle",         "稳定连射");
+	AddShopItem(CAT_WEAPON, SUB_NONE, "autoshot", 9,  "自动霰弹",   "weapon_autoshotgun",   "近距离清场");
+	AddShopItem(CAT_WEAPON, SUB_NONE, "hunting",  8,  "猎枪",       "weapon_hunting_rifle", "远距离点杀");
+	AddShopItem(CAT_WEAPON, SUB_NONE, "grenade",  16, "榴弹发射器", "weapon_grenade_launcher", "别对着墙打");
+
+	/* 更多武器：冲锋枪 */
+	AddShopItem(CAT_MORE, SUB_SMG, "smg",    5, "SMG",      "weapon_smg",          "30 发弹匣");
+	AddShopItem(CAT_MORE, SUB_SMG, "smgsil", 5, "消音 SMG", "weapon_smg_silenced", "更稳，子弹更多");
+	AddShopItem(CAT_MORE, SUB_SMG, "mp5",    6, "MP5",      "weapon_smg_mp5",      "冲锋枪里的全能款");
+
+	/* 远程：霰弹枪 */
+	AddShopItem(CAT_MORE, SUB_SHOTGUN, "pumpshot", 5,  "泵动霰弹", "weapon_pumpshotgun",    "一下一下推");
+	AddShopItem(CAT_MORE, SUB_SHOTGUN, "chrome",   6,  "铬管霰弹", "weapon_shotgun_chrome", "比泵动好一点");
+	AddShopItem(CAT_MORE, SUB_SHOTGUN, "autoshot", 9,  "自动霰弹", "weapon_autoshotgun",    "近距离清场");
+	AddShopItem(CAT_MORE, SUB_SHOTGUN, "spas",     10, "SPAS",     "weapon_shotgun_spas",   "连喷里最稳");
+
+	/* 远程：步枪 */
+	AddShopItem(CAT_MORE, SUB_RIFLE, "m16",    8,  "M16 步枪", "weapon_rifle",        "稳定连射");
+	AddShopItem(CAT_MORE, SUB_RIFLE, "ak47",   10, "AK-47",    "weapon_rifle_ak47",   "高伤害步枪");
+	AddShopItem(CAT_MORE, SUB_RIFLE, "desert", 9,  "战斗步枪", "weapon_rifle_desert", "三连发点射");
+	AddShopItem(CAT_MORE, SUB_RIFLE, "sg552",  9,  "SG552",    "weapon_rifle_sg552",  "带镜的步枪");
+	AddShopItem(CAT_MORE, SUB_RIFLE, "m60",    16, "M60",      "weapon_rifle_m60",    "100 发弹链，不能换弹");
+
+	/* 远程：狙击枪 */
+	AddShopItem(CAT_MORE, SUB_SNIPER, "hunting",  8,  "猎枪",     "weapon_hunting_rifle",   "远距离点杀");
+	AddShopItem(CAT_MORE, SUB_SNIPER, "military", 12, "军用狙击", "weapon_sniper_military", "秒特感");
+	AddShopItem(CAT_MORE, SUB_SNIPER, "scout",    12, "侦察狙击", "weapon_sniper_scout",    "轻，换弹快");
+	AddShopItem(CAT_MORE, SUB_SNIPER, "awp",      14, "AWP",      "weapon_sniper_awp",      "一枪一个特感");
+
+	/* 远程：特殊武器 */
+	AddShopItem(CAT_MORE, SUB_SPECIAL, "grenade", 16, "榴弹发射器", "weapon_grenade_launcher", "别对着墙打");
+
+	/* 远程：手枪 */
+	AddShopItem(CAT_MORE, SUB_PISTOL, "pistol", 3, "手枪",   "weapon_pistol",        "双持基础款");
+	AddShopItem(CAT_MORE, SUB_PISTOL, "magnum", 6, "马格南", "weapon_pistol_magnum", "一枪一个，弹少");
+
+	/* 近战：cls 统一 weapon_melee（电锯除外），具体种类看最后一个参数 */
+	AddShopItem(CAT_MORE, SUB_MELEE, "crowbar",   3, "撬棍",       "weapon_melee", "基础近战",   "crowbar");
+	AddShopItem(CAT_MORE, SUB_MELEE, "bbat",      3, "棒球棍",     "weapon_melee", "挥得快",     "baseball_bat");
+	AddShopItem(CAT_MORE, SUB_MELEE, "cbat",      3, "板球棒",     "weapon_melee", "差不多",     "cricket_bat");
+	AddShopItem(CAT_MORE, SUB_MELEE, "pan",       3, "平底锅",     "weapon_melee", "叮当响",     "frying_pan");
+	AddShopItem(CAT_MORE, SUB_MELEE, "eguitar",   4, "电吉他",     "weapon_melee", "同上",       "electric_guitar");
+	AddShopItem(CAT_MORE, SUB_MELEE, "katana",    6, "武士刀",     "weapon_melee", "范围最大",   "katana");
+	AddShopItem(CAT_MORE, SUB_MELEE, "knife",     5, "小刀",       "weapon_melee", "出手快",     "knife");
+	AddShopItem(CAT_MORE, SUB_MELEE, "machete",   5, "砍刀",       "weapon_melee", "经典",       "machete");
+	AddShopItem(CAT_MORE, SUB_MELEE, "golf",      3, "高尔夫球杆", "weapon_melee", "同上",       "golfclub");
+	AddShopItem(CAT_MORE, SUB_MELEE, "tonfa",     4, "警棍",       "weapon_melee", "快",         "tonfa");
+	AddShopItem(CAT_MORE, SUB_MELEE, "fireaxe",   5, "消防斧",     "weapon_melee", "重击",       "fireaxe");
+	AddShopItem(CAT_MORE, SUB_MELEE, "chainsaw",  8, "电锯",       "weapon_chainsaw", "按住就切", "chainsaw");
 }
 
 int GetPrice(int idx)
@@ -291,10 +361,6 @@ bool IsOnSale(int idx)
 {
 	return (g_iSale[0] == idx || g_iSale[1] == idx);
 }
-
-/* ============================================================
- *  积分发放
- * ============================================================ */
 
 int ScaledPoints(int base)
 {
@@ -600,30 +666,32 @@ void ShowMainMenu(int client)
 	Menu menu = new Menu(MenuHandler_Main);
 	menu.SetTitle("黑市商人\n补给点: %d", g_iPoints[client]);
 
-	char info[8];
+	char info[16];
 	char text[128];
 
-	Format(info, sizeof(info), "%d", CAT_SUPPLY);
+	Format(info, sizeof(info), "c:%d", CAT_SUPPLY);
 	Format(text, sizeof(text), "补给  (%d 件)", CountInCat(CAT_SUPPLY));
 	menu.AddItem(info, text);
 
-	Format(info, sizeof(info), "%d", CAT_THROW);
+	Format(info, sizeof(info), "c:%d", CAT_THROW);
 	Format(text, sizeof(text), "投掷物  (%d 件)", CountInCat(CAT_THROW));
 	menu.AddItem(info, text);
 
-	Format(info, sizeof(info), "%d", CAT_UPGRADE);
+	Format(info, sizeof(info), "c:%d", CAT_UPGRADE);
 	Format(text, sizeof(text), "弹药升级  (%d 件)", CountInCat(CAT_UPGRADE));
 	menu.AddItem(info, text);
 
-	Format(info, sizeof(info), "%d", CAT_WEAPON);
+	Format(info, sizeof(info), "c:%d", CAT_WEAPON);
 	Format(text, sizeof(text), "武器  (%d 件)", CountInCat(CAT_WEAPON));
 	menu.AddItem(info, text);
 
+	menu.AddItem("more", "更多武器（全部种类）");
 	menu.AddItem("attr", "属性强化  (本局内有效)");
 	menu.AddItem("pts", "查看我的数据");
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
 }
+
 
 public int MenuHandler_Main(Menu menu, MenuAction action, int param1, int param2)
 {
@@ -646,10 +714,19 @@ public int MenuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 				return 0;
 			}
 
-			int cat = StringToInt(info);
-			if (cat >= 0 && cat < CAT_MAX)
+			if (StrEqual(info, "more"))
 			{
-				ShowCategoryMenu(param1, cat);
+				ShowWeaponMenu(param1);
+				return 0;
+			}
+
+			if (info[0] == 'c' && info[1] == ':')
+			{
+				int cat = StringToInt(info[2]);
+				if (cat >= 0 && cat < CAT_MAX)
+				{
+					ShowItemList(param1, cat, SUB_NONE, 0);
+				}
 			}
 		}
 		case MenuAction_End:
@@ -660,41 +737,165 @@ public int MenuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 	return 0;
 }
 
-void ShowCategoryMenu(int client, int cat)
-{
-	Menu menu = new Menu(MenuHandler_Category);
-	menu.SetTitle("%s\n补给点: %d", CatName(cat), g_iPoints[client]);
-	menu.ExitBackButton = true;
 
-	char info[8];
-	char text[160];
+char[] CatName(int cat)
+{
+	static char buf[32];
+	switch (cat)
+	{
+		case CAT_SUPPLY:  strcopy(buf, sizeof(buf), "补给");
+		case CAT_THROW:   strcopy(buf, sizeof(buf), "投掷物");
+		case CAT_UPGRADE: strcopy(buf, sizeof(buf), "弹药升级");
+		case CAT_WEAPON:  strcopy(buf, sizeof(buf), "武器");
+		case CAT_MORE:    strcopy(buf, sizeof(buf), "更多武器");
+		default:          strcopy(buf, sizeof(buf), "商店");
+	}
+	return buf;
+}
+
+char[] SubName(int sub)
+{
+	static char buf[32];
+	switch (sub)
+	{
+		case SUB_SMG:     strcopy(buf, sizeof(buf), " · 冲锋枪");
+		case SUB_SHOTGUN: strcopy(buf, sizeof(buf), " · 霰弹枪");
+		case SUB_RIFLE:   strcopy(buf, sizeof(buf), " · 步枪");
+		case SUB_SNIPER:  strcopy(buf, sizeof(buf), " · 狙击枪");
+		case SUB_SPECIAL: strcopy(buf, sizeof(buf), " · 特殊武器");
+		case SUB_PISTOL:  strcopy(buf, sizeof(buf), " · 手枪");
+		case SUB_MELEE:   strcopy(buf, sizeof(buf), " · 近战武器");
+		default:          strcopy(buf, sizeof(buf), "");
+	}
+	return buf;
+}
+
+// 当前玩家正在看哪一栏（用于返回上级）
+int g_iListCat[MAXPLAYERS + 1];
+int g_iListSub[MAXPLAYERS + 1];
+
+void ShowItemList(int client, int cat, int sub, int page = 0)
+{
+	int items[MAX_SHOP_ITEMS];
+	int count = 0;
 
 	for (int i = 0; i < g_iShopCount; i++)
 	{
-		if (g_eShop[i].cat != cat)
+		if (g_eShop[i].cat == cat && g_eShop[i].sub == sub)
 		{
-			continue;
+			items[count++] = i;
 		}
+	}
 
-		Format(info, sizeof(info), "%d", i);
+	if (count == 0)
+	{
+		PrintToChat(client, "%s 这一栏暂时没货", BM_TAG);
+		return;
+	}
 
+	int pages = (count + SHOP_PER_PAGE - 1) / SHOP_PER_PAGE;
+	if (page < 0) page = 0;
+	if (page >= pages) page = pages - 1;
+
+	g_iListCat[client] = cat;
+	g_iListSub[client] = sub;
+
+	Menu menu = new Menu(MenuHandler_List);
+	menu.SetTitle("%s%s\n补给点: %d   (%d/%d)", CatName(cat), SubName(sub), g_iPoints[client], page + 1, pages);
+	menu.ExitBackButton = true;
+
+	char info[24];
+	char text[192];
+
+	int startIdx = page * SHOP_PER_PAGE;
+	for (int k = startIdx; k < startIdx + SHOP_PER_PAGE && k < count; k++)
+	{
+		int i = items[k];
 		int price = GetPrice(i);
+		Format(info, sizeof(info), "i:%d", i);
+
 		if (IsOnSale(i))
 		{
-			Format(text, sizeof(text), "[特价] %s  %d 点  -  %s", g_eShop[i].name, price, g_eShop[i].note);
+			Format(text, sizeof(text), "[特价] %s   %d 点  -  %s", g_eShop[i].name, price, g_eShop[i].note);
 		}
 		else
 		{
-			Format(text, sizeof(text), "%s  %d 点  -  %s", g_eShop[i].name, price, g_eShop[i].note);
+			Format(text, sizeof(text), "%s   %d 点  -  %s", g_eShop[i].name, price, g_eShop[i].note);
 		}
-
 		menu.AddItem(info, text);
+	}
+
+	if (page > 0)
+	{
+		Format(info, sizeof(info), "p:%d:%d:%d", cat, sub, page - 1);
+		menu.AddItem(info, "<< 上一页");
+	}
+	if (page + 1 < pages)
+	{
+		Format(info, sizeof(info), "p:%d:%d:%d", cat, sub, page + 1);
+		menu.AddItem(info, "下一页 >>");
 	}
 
 	menu.Display(client, MENU_TIME_FOREVER);
 }
 
-public int MenuHandler_Category(Menu menu, MenuAction action, int param1, int param2)
+public int MenuHandler_List(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[24];
+			menu.GetItem(param2, info, sizeof(info));
+
+			if (info[0] == 'i' && info[1] == ':')
+			{
+				TryBuy(param1, StringToInt(info[2]));
+			}
+			else if (info[0] == 'p' && info[1] == ':')
+			{
+				char parts[4][8];
+				ExplodeString(info, ":", parts, 4, 8);
+				ShowItemList(param1, StringToInt(parts[1]), StringToInt(parts[2]), StringToInt(parts[3]));
+			}
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				if (g_iListSub[param1] == SUB_MELEE)
+				{
+					ShowWeaponMenu(param1);
+				}
+				else if (g_iListCat[param1] == CAT_MORE)
+				{
+					ShowRangedMenu(param1);
+				}
+				else
+				{
+					ShowMainMenu(param1);
+				}
+			}
+		}
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+	}
+	return 0;
+}
+
+void ShowWeaponMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_Weapon);
+	menu.SetTitle("武器\n补给点: %d", g_iPoints[client]);
+	menu.AddItem("ranged", "远程武器");
+	menu.AddItem("melee",  "近战武器");
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_Weapon(Menu menu, MenuAction action, int param1, int param2)
 {
 	switch (action)
 	{
@@ -702,7 +903,15 @@ public int MenuHandler_Category(Menu menu, MenuAction action, int param1, int pa
 		{
 			char info[16];
 			menu.GetItem(param2, info, sizeof(info));
-			TryBuy(param1, StringToInt(info));
+
+			if (StrEqual(info, "ranged"))
+			{
+				ShowRangedMenu(param1);
+			}
+			else if (StrEqual(info, "melee"))
+			{
+				ShowItemList(param1, CAT_MORE, SUB_MELEE, 0);
+			}
 		}
 		case MenuAction_Cancel:
 		{
@@ -718,6 +927,91 @@ public int MenuHandler_Category(Menu menu, MenuAction action, int param1, int pa
 	}
 	return 0;
 }
+
+void ShowRangedMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_Ranged);
+	menu.SetTitle("远程武器\n补给点: %d", g_iPoints[client]);
+	menu.AddItem("1", "冲锋枪");
+	menu.AddItem("2", "霰弹枪");
+	menu.AddItem("3", "步枪");
+	menu.AddItem("4", "狙击枪");
+	menu.AddItem("5", "特殊武器");
+	menu.AddItem("6", "手枪");
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_Ranged(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[16];
+			menu.GetItem(param2, info, sizeof(info));
+			ShowItemList(param1, CAT_MORE, StringToInt(info), 0);
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				ShowWeaponMenu(param1);
+			}
+		}
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+	}
+	return 0;
+}
+
+// 买完 / 失败后回到同一栏（自动算页码）
+void ReopenList(int client, int idx)
+{
+	if (client < 1 || !IsClientInGame(client) || idx < 0 || idx >= g_iShopCount)
+	{
+		return;
+	}
+
+	int cat = g_eShop[idx].cat;
+	int sub = g_eShop[idx].sub;
+
+	int pos = 0;
+	for (int i = 0; i < idx; i++)
+	{
+		if (g_eShop[i].cat == cat && g_eShop[i].sub == sub)
+		{
+			pos++;
+		}
+	}
+
+	DataPack dp = new DataPack();
+	dp.WriteCell(GetClientUserId(client));
+	dp.WriteCell(cat);
+	dp.WriteCell(sub);
+	dp.WriteCell(pos / SHOP_PER_PAGE);
+	CreateTimer(0.1, Timer_ReopenList, dp, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_ReopenList(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	int cat    = dp.ReadCell();
+	int sub    = dp.ReadCell();
+	int page   = dp.ReadCell();
+	delete dp;
+
+	int client = GetClientOfUserId(userid);
+	if (client > 0 && IsClientInGame(client))
+	{
+		ShowItemList(client, cat, sub, page);
+	}
+	return Plugin_Stop;
+}
+
 
 /* 菜单选中后引擎会立刻关掉它，此时同步 Display 有概率被吞。
    统一延迟一拍再开：cat < 0 表示回商店主界面。 */
@@ -757,7 +1051,7 @@ public Action Timer_ReopenMenu(Handle timer, DataPack dp)
 	}
 	else if (cat >= 0)
 	{
-		ShowCategoryMenu(client, cat);
+		ShowItemList(client, cat, SUB_NONE, 0);
 	}
 	return Plugin_Stop;
 }
@@ -847,6 +1141,41 @@ public Action Timer_RestoreCheatsLaser(Handle timer)
 	return Plugin_Stop;
 }
 
+// 近战武器：统一 weapon_melee（电锯单独一个类），具体种类用 m_strMapSetScriptName 指定
+int GiveMeleeWeapon(int client, const char[] scriptName)
+{
+	char cls[32];
+
+	if (StrEqual(scriptName, "chainsaw"))
+	{
+		strcopy(cls, sizeof(cls), "weapon_chainsaw");
+	}
+	else
+	{
+		strcopy(cls, sizeof(cls), "weapon_melee");
+	}
+
+	int ent = CreateEntityByName(cls);
+	if (ent <= 0)
+	{
+		return -1;
+	}
+
+	if (!StrEqual(scriptName, "chainsaw"))
+	{
+		if (!HasEntProp(ent, Prop_Data, "m_strMapSetScriptName"))
+		{
+			RemoveEntity(ent);
+			return -1;
+		}
+		SetEntPropString(ent, Prop_Data, "m_strMapSetScriptName", scriptName);
+	}
+
+	DispatchSpawn(ent);
+	EquipPlayerWeapon(client, ent);
+	return ent;
+}
+
 void TryBuy(int client, int idx)
 {
 	if (idx < 0 || idx >= g_iShopCount)
@@ -865,14 +1194,14 @@ void TryBuy(int client, int idx)
 		PrintToChat(client, "%s 补给点不够：%s 需要 \x04%d\x01，你只有 %d",
 			BM_TAG, g_eShop[idx].name, price, g_iPoints[client]);
 		PlayClientSound(client, "BlackMarket.Deny", "blackmarket/bm_deny.mp3");
-		ReopenMenu(client, -1);
+		ReopenList(client, idx);
 		return;
 	}
 
 	if (!IsPlayerAlive(client))
 	{
 		PrintToChat(client, "%s 死了买不了东西，先让队友把你拉起来", BM_TAG);
-		ReopenMenu(client, -1);
+		ReopenList(client, idx);
 		return;
 	}
 
@@ -880,19 +1209,30 @@ void TryBuy(int client, int idx)
 	strcopy(cls, sizeof(cls), g_eShop[idx].cls);
 
 	int ent;
-	if (IsAmmoUpgrade(cls))
+	if (g_eShop[idx].melee[0] != '\0')
+	{
+		ent = GiveMeleeWeapon(client, g_eShop[idx].melee);
+
+		if (ent == -1)
+		{
+			PrintToChat(client, "%s 近战武器发放失败，没扣你的点", BM_TAG);
+			ReopenList(client, idx);
+			return;
+		}
+	}
+	else if (IsAmmoUpgrade(cls))
 	{
 		ent = ApplyAmmoUpgrade(client, cls);
 		if (ent == -1)
 		{
 			PrintToChat(client, "%s 需要先拿一把主武器才能装弹药升级", BM_TAG);
-			ReopenMenu(client, -1);
+			ReopenList(client, idx);
 			return;
 		}
 		if (ent == -2)
 		{
 			PrintToChat(client, "%s 你的枪已经是这种弹药了，没扣点", BM_TAG);
-			ReopenMenu(client, -1);
+			ReopenList(client, idx);
 			return;
 		}
 	}
@@ -912,7 +1252,7 @@ void TryBuy(int client, int idx)
 		{
 			PrintToChat(client, "%s 发放失败（可能背包已满），没扣你的点", BM_TAG);
 			LogError("[BlackMarket] GivePlayerItem 失败: client=%L item=%s", client, cls);
-			ReopenMenu(client, -1);
+			ReopenList(client, idx);
 			return;
 		}
 	}
@@ -938,7 +1278,7 @@ void TryBuy(int client, int idx)
 		PrintToChatAll("%s \x04%N\x01 抢走了特价商品 \x04%s\x01！", BM_TAG, client, g_eShop[idx].name);
 	}
 
-	ReopenMenu(client, g_eShop[idx].cat);
+	ReopenList(client, idx);
 }
 
 int CountInCat(int cat)
@@ -954,18 +1294,6 @@ int CountInCat(int cat)
 	return n;
 }
 
-char[] CatName(int cat)
-{
-	static char buf[32];
-	switch (cat)
-	{
-		case CAT_SUPPLY:  strcopy(buf, sizeof(buf), "补给");
-		case CAT_THROW:   strcopy(buf, sizeof(buf), "投掷物");
-		case CAT_UPGRADE: strcopy(buf, sizeof(buf), "弹药升级");
-		default:          strcopy(buf, sizeof(buf), "武器");
-	}
-	return buf;
-}
 
 void ShowMyStats(int client)
 {
@@ -1781,6 +2109,7 @@ void ShowTestMenu(int client)
 	menu.AddItem("refund", "撤销加点（按原价退还全部已花点数）");
 	menu.AddItem("speed",  "速度 / 体能调试");
 	menu.AddItem("dmg",    "伤害诊断（火力 / 近战）");
+	menu.AddItem("wpn",    "武器属性诊断（换弹用）");
 	menu.AddItem("killbots", "杀死所有人机队友");
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
@@ -1812,6 +2141,11 @@ public int MenuHandler_Test(Menu menu, MenuAction action, int param1, int param2
 			else if (StrEqual(info, "speed"))
 			{
 				ShowSpeedTestMenu(param1);
+			}
+			else if (StrEqual(info, "wpn"))
+			{
+				PrintWeaponDiag(param1);
+				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
 			}
 			else if (StrEqual(info, "dmg"))
 			{
@@ -2077,6 +2411,34 @@ void PrintSpeedDiag(int client)
 	PrintToChat(client, "当前 Lagged=%.2f ｜ Maxspeed=%.0f", lagged, maxspd);
 }
 
+void PrintWeaponDiag(int client)
+{
+	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (weapon <= 0 || !IsValidEntity(weapon))
+	{
+		PrintToChat(client, "%s 手上没有武器", BM_TAG);
+		return;
+	}
+
+	char cls[64];
+	char netcls[64];
+	GetEntityClassname(weapon, cls, sizeof(cls));
+	GetEntityNetClass(weapon, netcls, sizeof(netcls));
+
+	PrintToChat(client, "%s 武器诊断", BM_TAG);
+	PrintToChat(client, "classname=%s  网络类=%s", cls, netcls);
+
+	PrintToChat(client, "reloadStart=%s  reloadInsert=%s  reloadEnd=%s",
+		HasEntProp(weapon, Prop_Send, "m_reloadStartDuration") ? "有" : "无",
+		HasEntProp(weapon, Prop_Send, "m_reloadInsertDuration") ? "有" : "无",
+		HasEntProp(weapon, Prop_Send, "m_reloadEndDuration") ? "有" : "无");
+
+	PrintToChat(client, "reloadState=%s  playbackRate=%s  nextPrimary=%s",
+		HasEntProp(weapon, Prop_Send, "m_reloadState") ? "有" : "无",
+		HasEntProp(weapon, Prop_Send, "m_flPlaybackRate") ? "有" : "无",
+		HasEntProp(weapon, Prop_Send, "m_flNextPrimaryAttack") ? "有" : "无");
+}
+
 void PrintDmgDiag(int client)
 {
 	PrintToChat(client, "%s 伤害诊断 v%s", BM_TAG, PLUGIN_VERSION);
@@ -2313,9 +2675,12 @@ public Action Timer_AlignViewModel(Handle timer, DataPack dp)
  *  就按倍率缩短。必须记录“上次写入的值”，否则每帧都会再乘一次，越缩越短。
  */
 
-bool IsSniperWeapon(const char[] cls)
+// 需要缩短“每发间隔”的武器：狙击（拉栓）+ 散弹枪（泵动/上膛）
+bool IsBoltWeapon(const char[] cls)
 {
-	return (StrContains(cls, "hunting_rifle") != -1 || StrContains(cls, "sniper") != -1);
+	return (StrContains(cls, "hunting_rifle") != -1
+		|| StrContains(cls, "sniper") != -1
+		|| StrContains(cls, "shotgun") != -1);
 }
 
 void RestoreWeaponPlayback(int weapon)
@@ -2356,7 +2721,7 @@ public void OnGameFrame()
 			else
 			{
 				GetEntityClassname(weapon, cls, sizeof(cls));
-				if (!IsSniperWeapon(cls))
+				if (!IsBoltWeapon(cls))
 				{
 					ok = false;
 				}
@@ -2392,10 +2757,13 @@ public void OnGameFrame()
 		// 拉栓动画：常驻倍速。先前“开火后那一刻才改倍率”会让动画中途变速，整套动作重播一遍
 		// 注意：SendWeaponAnim 每次发动画都会把武器的 m_flPlaybackRate 重置成 1.0，
 		// 所以这里改倍率必然发生在“动画已经开始之后”，引擎会把整段开火动画重发一次
-		// （表现就是多发一个弹壳）。因此默认关闭，只保留射击间隔缩短。
+		// （表现就是多发一个弹壳）。狙击默认关闭；散弹枪默认开启，否则泵动动画会卡住节奏。
+		bool isShotgun = (StrContains(cls, "shotgun") != -1);
+		bool wantFastAnim = isShotgun ? g_cvShotgunAnim.BoolValue : g_cvSniperAnim.BoolValue;
+
 		if (now >= g_fReloadBusy[i] && HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
 		{
-			if (g_cvSniperAnim.BoolValue && rate < 1.0)
+			if (wantFastAnim && rate < 1.0)
 			{
 				float desired = 1.0 / rate;
 				float cur = GetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate");
@@ -2434,36 +2802,35 @@ public void OnGameFrame()
 		}
 		SetEntPropFloat(i, Prop_Send, "m_flNextAttack", newTime);
 
-		DebugChat(i, "狙击拉栓 %s：%.3fs -> %.3fs（rate %.2f）", cls, interval, interval * rate, rate);
+		DebugChat(i, "射击间隔 %s：%.3fs -> %.3fs（rate %.2f）", cls, interval, interval * rate, rate);
 	}
 }
 
 void BoostShotgunReload(int client, int weapon, const char[] cls, float rate)
 {
-	float tStart, tInsert, tEnd;
-
-	if (StrContains(cls, "autoshotgun") != -1)
-	{
-		tStart = 0.666666;  tInsert = 0.4;    tEnd = 0.675;
-	}
-	else if (StrContains(cls, "shotgun_spas") != -1)
-	{
-		tStart = 0.5;       tInsert = 0.375;  tEnd = 0.7;
-	}
-	else
-	{
-		tStart = 0.5;       tInsert = 0.5;    tEnd = 0.6;
-	}
-
 	if (!HasEntProp(weapon, Prop_Send, "m_reloadStartDuration"))
 	{
 		DebugChat(client, "霰弹枪加速不可用：%s 没有 m_reloadStartDuration", cls);
 		return;
 	}
 
-	SetEntPropFloat(weapon, Prop_Send, "m_reloadStartDuration",  tStart  * rate);
-	SetEntPropFloat(weapon, Prop_Send, "m_reloadInsertDuration", tInsert * rate);
-	SetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration",    tEnd    * rate);
+	if (weapon <= 0 || weapon >= BM_MAX_ENT)
+	{
+		return;
+	}
+
+	// 第一次遇到这把枪时记下真实时长（不要硬编码，L4D2 里每把枪的值都不同）
+	if (!g_bShotBase[weapon])
+	{
+		g_fShotBase[weapon][0] = GetEntPropFloat(weapon, Prop_Send, "m_reloadStartDuration");
+		g_fShotBase[weapon][1] = GetEntPropFloat(weapon, Prop_Send, "m_reloadInsertDuration");
+		g_fShotBase[weapon][2] = GetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration");
+		g_bShotBase[weapon] = true;
+	}
+
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadStartDuration",  g_fShotBase[weapon][0] * rate);
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadInsertDuration", g_fShotBase[weapon][1] * rate);
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration",    g_fShotBase[weapon][2] * rate);
 
 	if (HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
 	{
@@ -2475,8 +2842,20 @@ void BoostShotgunReload(int client, int weapon, const char[] cls, float rate)
 	dp.WriteCell(EntIndexToEntRef(weapon));
 	CreateTimer(0.3, Timer_ShotgunReloadWatch, dp, TIMER_REPEAT | TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
 
-	DebugChat(client, "霰弹枪加速 %s：start/insert/end = %.3f/%.3f/%.3f（rate %.2f）",
-		cls, tStart * rate, tInsert * rate, tEnd * rate, rate);
+	// 换弹期间每 0.1 秒重写一次缩放后的时长：万一是游戏每塞一发就把属性重置了，这样能压住
+	DataPack keep = new DataPack();
+	keep.WriteCell(GetClientUserId(client));
+	keep.WriteCell(EntIndexToEntRef(weapon));
+	keep.WriteFloat(rate);
+	g_iShotTicks[client] = 0;
+	CreateTimer(0.1, Timer_ShotgunKeepBoost, keep, TIMER_REPEAT | TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
+
+	DebugChat(client, "霰弹枪加速 %s：start %.3f→%.3f  insert %.3f→%.3f  end %.3f→%.3f（rate %.2f）",
+		cls,
+		g_fShotBase[weapon][0], g_fShotBase[weapon][0] * rate,
+		g_fShotBase[weapon][1], g_fShotBase[weapon][1] * rate,
+		g_fShotBase[weapon][2], g_fShotBase[weapon][2] * rate,
+		rate);
 }
 
 // 记下发一个“播放倍率复位”，带代号：如果期间又被新的倍率覆盖，这次复位就作废
@@ -2509,6 +2888,46 @@ public Action Timer_ResetPlayback(Handle timer, DataPack dp)
 		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0);
 	}
 	return Plugin_Stop;
+}
+
+public Action Timer_ShotgunKeepBoost(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	int entref = dp.ReadCell();
+	float rate = dp.ReadFloat();
+
+	int client = GetClientOfUserId(userid);
+	int weapon = EntRefToEntIndex(entref);
+
+	if (client <= 0 || !IsClientInGame(client) || weapon <= 0 || !IsValidEntity(weapon))
+	{
+		return Plugin_Stop;
+	}
+
+	if (!HasEntProp(weapon, Prop_Send, "m_reloadState") || GetEntProp(weapon, Prop_Send, "m_reloadState") == 0)
+	{
+		return Plugin_Stop;
+	}
+
+	if (weapon < BM_MAX_ENT && g_bShotBase[weapon])
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_reloadStartDuration",  g_fShotBase[weapon][0] * rate);
+		SetEntPropFloat(weapon, Prop_Send, "m_reloadInsertDuration", g_fShotBase[weapon][1] * rate);
+		SetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration",    g_fShotBase[weapon][2] * rate);
+	}
+
+	// 调试：每 5 次（0.5 秒）报一次换弹状态和剩余时间
+	g_iShotTicks[client]++;
+	if (g_cvDebug.BoolValue && (g_iShotTicks[client] % 5) == 0)
+	{
+		float npa = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+		int clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
+		DebugChat(client, "换弹中 state=%d 弹匣=%d 剩余=%.3fs",
+			GetEntProp(weapon, Prop_Send, "m_reloadState"), clip, npa - GetGameTime());
+	}
+
+	return Plugin_Continue;
 }
 
 public Action Timer_ShotgunReloadWatch(Handle timer, DataPack dp)
