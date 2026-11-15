@@ -113,7 +113,6 @@ ConVar   g_cvSpeedStep;       // 体能强化：每级提升比例
 float    g_fSpeedForce[MAXPLAYERS + 1];
 float    g_fShotBase[BM_MAX_ENT][3];      // 散弹枪三个换弹时长的原始值
 bool     g_bShotBase[BM_MAX_ENT];         // 上面那组原始值是否已记录
-int      g_iShotTicks[MAXPLAYERS + 1];    // 换弹加速的调试节流计数   // 调试：只对下命令的这个人生效的强制移速
 int      g_iDmgSeen[MAXPLAYERS + 1];      // 伤害诊断：作为攻击者进入回调的次数
 int      g_iDmgBoosted[MAXPLAYERS + 1];   // 伤害诊断：真正加了成的次数
 char     g_sDmgWeapon[MAXPLAYERS + 1][48];// 伤害诊断：最近一次造成伤害的武器
@@ -2481,23 +2480,6 @@ public Action Timer_ApplyAttrs(Handle timer, any userid)
  *  m_reloadStartDuration / m_reloadInsertDuration / m_reloadEndDuration。
  */
 
-// 调试信息：开了 sm_bm_debug 时同时打到聊天框和服务器控制台，方便实机验证
-void DebugChat(int client, const char[] fmt, any ...)
-{
-	if (!g_cvDebug.BoolValue)
-	{
-		return;
-	}
-
-	char buf[256];
-	VFormat(buf, sizeof(buf), fmt, 3);
-
-	if (client > 0)
-	{
-		PrintToChat(client, "%s [调试] %s", BM_TAG, buf);
-	}
-	PrintToServer("[BlackMarket] %s", buf);
-}
 
 public void Event_WeaponReload(Event event, const char[] name, bool dontBroadcast)
 {
@@ -2535,7 +2517,7 @@ public void Event_WeaponReload(Event event, const char[] name, bool dontBroadcas
 
 	if (StrContains(cls, "shotgun") != -1)
 	{
-		BoostShotgunReload(client, weapon, cls, rate);
+		BoostShotgunReload(client, weapon, rate);
 	}
 	else
 	{
@@ -2551,7 +2533,6 @@ void BoostMagazineReload(int client, int weapon, const char[] cls, float rate)
 
 	if (dur <= 0.05 || dur > 6.0)
 	{
-		DebugChat(client, "换弹加速跳过 %s：间隔异常 %.3f 秒", cls, dur);
 		return;
 	}
 
@@ -2563,7 +2544,6 @@ void BoostMagazineReload(int client, int weapon, const char[] cls, float rate)
 		{
 			rate = g_cvReloadFloor.FloatValue;
 		}
-		DebugChat(client, "榴弹发射器额外加速：本发倍率 %.2f", rate);
 	}
 
 	float newEnd = now + dur * rate;
@@ -2605,9 +2585,6 @@ void BoostMagazineReload(int client, int weapon, const char[] cls, float rate)
 		}
 	}
 
-	DebugChat(client, "换弹加速 %s：%.3fs -> %.3fs（rate %.2f, playbackRate=%s, idle=%s）",
-		cls, dur, dur * rate, rate,
-		hasPb ? "有" : "无", hasIdle ? "有" : "无");
 }
 
 // 把 viewmodel 的动画层起始时间往前挪，让客户端动画和加速后的服务端时间对得上
@@ -2626,12 +2603,10 @@ public Action Timer_AlignViewModel(Handle timer, DataPack dp)
 	int vm = GetEntDataEnt2(client, g_iViewModelO);
 	if (vm <= 0 || !IsValidEntity(vm))
 	{
-		DebugChat(client, "换弹动画对齐跳过：拿不到 viewmodel");
 		return Plugin_Stop;
 	}
 
 	SetEntDataFloat(vm, g_iVMStartTimeO, startTime, true);
-	DebugChat(client, "换弹动画已对齐 viewmodel（start=%.3f）", startTime);
 
 	return Plugin_Stop;
 }
@@ -2769,15 +2744,13 @@ public void OnGameFrame()
 		}
 		SetEntPropFloat(i, Prop_Send, "m_flNextAttack", newTime);
 
-		DebugChat(i, "射击间隔 %s：%.3fs -> %.3fs（rate %.2f）", cls, interval, interval * rate, rate);
 	}
 }
 
-void BoostShotgunReload(int client, int weapon, const char[] cls, float rate)
+void BoostShotgunReload(int client, int weapon, float rate)
 {
 	if (!HasEntProp(weapon, Prop_Send, "m_reloadStartDuration"))
 	{
-		DebugChat(client, "霰弹枪加速不可用：%s 没有 m_reloadStartDuration", cls);
 		return;
 	}
 
@@ -2814,15 +2787,8 @@ void BoostShotgunReload(int client, int weapon, const char[] cls, float rate)
 	keep.WriteCell(GetClientUserId(client));
 	keep.WriteCell(EntIndexToEntRef(weapon));
 	keep.WriteFloat(rate);
-	g_iShotTicks[client] = 0;
 	CreateTimer(0.1, Timer_ShotgunKeepBoost, keep, TIMER_REPEAT | TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
 
-	DebugChat(client, "霰弹枪加速 %s：start %.3f→%.3f  insert %.3f→%.3f  end %.3f→%.3f（rate %.2f）",
-		cls,
-		g_fShotBase[weapon][0], g_fShotBase[weapon][0] * rate,
-		g_fShotBase[weapon][1], g_fShotBase[weapon][1] * rate,
-		g_fShotBase[weapon][2], g_fShotBase[weapon][2] * rate,
-		rate);
 }
 
 // 记下发一个“播放倍率复位”，带代号：如果期间又被新的倍率覆盖，这次复位就作废
@@ -2884,16 +2850,6 @@ public Action Timer_ShotgunKeepBoost(Handle timer, DataPack dp)
 		SetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration",    g_fShotBase[weapon][2] * rate);
 	}
 
-	// 调试：每 5 次（0.5 秒）报一次换弹状态和剩余时间
-	g_iShotTicks[client]++;
-	if (g_cvDebug.BoolValue && (g_iShotTicks[client] % 5) == 0)
-	{
-		float npa = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
-		int clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
-		DebugChat(client, "换弹中 state=%d 弹匣=%d 剩余=%.3fs",
-			GetEntProp(weapon, Prop_Send, "m_reloadState"), clip, npa - GetGameTime());
-	}
-
 	return Plugin_Continue;
 }
 
@@ -2930,7 +2886,6 @@ public Action Timer_ShotgunReloadWatch(Handle timer, DataPack dp)
 	}
 	SetEntPropFloat(client, Prop_Send, "m_flNextAttack", now + 0.1);
 
-	DebugChat(client, "霰弹枪换弹结束，playbackRate 已还原");
 
 	return Plugin_Stop;
 }
