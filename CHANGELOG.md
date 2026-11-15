@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.4.3 — 2026-11-15
+
+### 修复：换弹强化终于真的生效
+
+旧实现只改 `m_flNextPrimaryAttack`，但换弹结束时引擎会重新写这个值，所以玩家完全感觉不到变化。
+
+参考 hardmod2 的 fast reload 实现（`sources/l4d_powerups_rush.sp`，代码署名 tPoncho），改成在 `weapon_reload` 当下同时改这几处：
+
+- `m_flPlaybackRate = 1/rate`：换弹动画本身加速
+- `m_flTimeWeaponIdle`、`m_flNextPrimaryAttack`、玩家 `m_flNextAttack`：可开火时间一起提前
+- 换弹结束后把播放倍率还原成 1.0（带代号，避免旧定时器把新倍率清掉）
+- 霰弹枪不是弹匣类，改走 `m_reloadStartDuration / m_reloadInsertDuration / m_reloadEndDuration`
+
+换弹加速会引出“整套动画重播一遍”的二次播放问题，用参考实现里的做法修掉了：在换弹结束前 0.4 秒把 viewmodel 的 `m_flLayerStartTime` 往前推掉省下的时间。
+
+### 变更
+
+- 换弹强化从 **-12%/级 提到 -20%/级**（三级 -60%），AK 的换弹从 2.06 秒缩到 0.82 秒
+- 新增 `sm_bm_attr_reload_step`（默认 0.20）和 `sm_bm_attr_reload_floor`（默认 0.30），现场调强度不用重编译
+- 榴弹发射器在强化基础上再快 15%（`sm_bm_attr_gl_mult`，默认 0.85）
+- 狙击枪的拉栓间隔（射击间隔）也吃换弹强化，但受 `sm_bm_attr_sniper_floor`（默认 0.60）限制
+- 新增 **`!test` 临时测试面板**（`sm_bm_cheat_enabled` 控制）：撤销加点，按原价退回已花点数
+
+### 已知限制
+
+- **拉栓动画无法同步加速**。`SendWeaponAnim` 每次发动画都会把武器的 `m_flPlaybackRate` 重置成 1.0，所以服务端改倍率必然发生在“动画已经开始之后”，引擎会把整段开火动画重发一次——表现是多掉一个弹壳。试过开火后改、持枪时常驻改，都一样；参考实现同样只缩间隔、不动动画。因此 `sm_bm_attr_sniper_anim` 默认 **0**，只缩短射击间隔，手部动作维持原速。
+- `!test` 面板是临时工具，正式对外发布前应当移除或隐藏。
+
 ## 1.4.2 — 2026-11-14
 
 ### 修复：音效终于能响了

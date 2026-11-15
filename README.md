@@ -4,7 +4,7 @@
 
 A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn points, spend them at `!shop`. Persists across maps via SQLite.
 
-![version](https://img.shields.io/badge/version-1.4.2-blue)
+![version](https://img.shields.io/badge/version-1.4.3-blue)
 ![sourcemod](https://img.shields.io/badge/SourceMod-1.12%2B-orange)
 ![game](https://img.shields.io/badge/game-L4D2-red)
 ![license](https://img.shields.io/badge/license-MIT-green)

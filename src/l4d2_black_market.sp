@@ -18,7 +18,7 @@
 #include <sdkhooks>
 #include <dbi>
 
-#define PLUGIN_VERSION  "1.4.2"
+#define PLUGIN_VERSION  "1.4.3"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -81,6 +81,18 @@ ConVar   g_cvCampaignReset;
 ConVar   g_cvResetPoints;
 ConVar   g_cvDebug;
 ConVar   g_cvSoundMode;
+ConVar   g_cvReloadStep;      // 换弹强化：每级减少的比例
+ConVar   g_cvReloadFloor;     // 换弹强化：换弹时间倍率下限
+ConVar   g_cvSniperBolt;      // 狙击枪拉栓（射击间隔）是否吃换弹强化
+ConVar   g_cvSniperAnim;      // 狙击枪拉栓动画是否同步加速
+ConVar   g_cvSniperFloor;     // 狙击枪射击间隔倍率下限
+ConVar   g_cvGrenadeMult;     // 榴弹发射器换弹额外倍率
+int      g_iViewModelO  = -1; // CTerrorPlayer::m_hViewModel
+int      g_iVMStartTimeO = -1;// CTerrorViewModel::m_flLayerStartTime
+int      g_iBoltWeapon[MAXPLAYERS + 1];   // 狙击拉栓：上次记录的武器
+int      g_iPlaybackGen[MAXPLAYERS + 1];  // 播放倍率“代号”，防止旧定时器把新的倍率重置掉
+float    g_fBoltNext[MAXPLAYERS + 1];     // 狙击拉栓：上次写入的可开火时间
+float    g_fReloadBusy[MAXPLAYERS + 1];   // 换弹进行到什么时候（这段时间别去抢播放倍率）
 bool     g_bPrecBuy = false;
 bool     g_bPrecDeny = false;
 int      g_iSndTestCount[MAXPLAYERS + 1];
@@ -125,11 +137,25 @@ public void OnPluginStart()
 	g_cvResetPoints  = CreateConVar("sm_bm_reset_points", "1",    "1=通关时补给点也一起清零", _, true, 0.0, true, 1.0);
 	g_cvDebug        = CreateConVar("sm_bm_debug",        "0",    "1=在服务器控制台输出投掷物加速的调试信息", _, true, 0.0, true, 1.0);
 	g_cvSoundMode    = CreateConVar("sm_bm_sound_mode",   "0",    "0=客户端 play 命令（默认，唯一实测可用的方式）  1=引擎 EmitSound", _, true, 0.0, true, 1.0);
+	g_cvReloadStep   = CreateConVar("sm_bm_attr_reload_step",  "0.20", "换弹强化每级减少的换弹时间比例（0.20 = 每级 -20%，三级 -60%）", _, true, 0.05, true, 0.45);
+	g_cvReloadFloor  = CreateConVar("sm_bm_attr_reload_floor", "0.30", "换弹时间倍率下限（0.30 = 最快只剩原时长的 30%）", _, true, 0.20, true, 0.90);
+	g_cvSniperBolt   = CreateConVar("sm_bm_attr_sniper_bolt",  "1",    "1=狙击枪的拉栓/射击间隔也吃换弹强化", _, true, 0.0, true, 1.0);
+	g_cvSniperAnim   = CreateConVar("sm_bm_attr_sniper_anim",  "0",    "1=拉栓动画同步加速（会让开火动画重播、多掉弹壳，默认关）", _, true, 0.0, true, 1.0);
+	g_cvSniperFloor  = CreateConVar("sm_bm_attr_sniper_floor", "0.60", "狙击枪射击间隔的倍率下限（0.60 = 最快只剩 60%）", _, true, 0.30, true, 0.95);
+	g_cvGrenadeMult  = CreateConVar("sm_bm_attr_gl_mult",      "0.85", "榴弹发射器换弹在强化基础上再乘这个值（0.85 = 再快 15%）", _, true, 0.50, true, 1.0);
 
 	LoadShopTable();
 	HookGameEvents();
 	RegisterCommands();
 	ConnectDatabase();
+
+	// 换弹动画对齐用的两个偏移（拿不到就跳过对齐，不影响别的东西）
+	g_iViewModelO   = FindSendPropInfo("CTerrorPlayer",    "m_hViewModel");
+	g_iVMStartTimeO = FindSendPropInfo("CTerrorViewModel", "m_flLayerStartTime");
+	if (g_iViewModelO < 0 || g_iVMStartTimeO < 0)
+	{
+		PrintToServer("[BlackMarket] 换弹动画对齐不可用（viewmodel 偏移未找到），音效/其它功能不受影响");
+	}
 
 	AutoExecConfig(true, "l4d2_black_market");
 
@@ -170,6 +196,9 @@ void RegisterCommands()
 	RegConsoleCmd("sm_bm_sndcheck", Cmd_SoundCheck, "检查音效文件是否被游戏读到");
 	RegConsoleCmd("sm_bm_sndtest",  Cmd_SoundTest,  "分别用引擎和 play 命令放两声，测试哪条路通");
 	RegConsoleCmd("sm_cheat",  Cmd_Cheat,    "开关自动补给点（花多少自动补满）");
+
+	// 临时测试面板（受 sm_bm_cheat_enabled 控制，正式发布前可去掉）
+	RegConsoleCmd("sm_test", Cmd_TestMenu, "黑市测试面板（临时）");
 
 	RegAdminCmd("sm_bm_give",     Cmd_AdminGive, ADMFLAG_CHEATS, "sm_bm_give <目标> <数量>  发补给点");
 	RegAdminCmd("sm_bm_resetall", Cmd_AdminReset, ADMFLAG_ROOT,  "清空所有人的补给点存档");
@@ -1418,7 +1447,11 @@ void AttrEffectText(int attr, char[] buf, int maxlen)
 		case ATTR_DMG:    strcopy(buf, maxlen, "枪械伤害 +8%/级");
 		case ATTR_MELEE:  strcopy(buf, maxlen, "近战伤害 +15%/级");
 		case ATTR_THROW:  strcopy(buf, maxlen, "投掷初速 +22%/级");
-		case ATTR_RELOAD: strcopy(buf, maxlen, "换弹时间 -12%/级");
+		case ATTR_RELOAD:
+		{
+			int pct = RoundToNearest(g_cvReloadStep.FloatValue * 100.0);
+			Format(buf, maxlen, "换弹 -%d%%/级", pct);
+		}
 		case ATTR_SPD:    strcopy(buf, maxlen, "移动速度 +5%/级");
 		default:          strcopy(buf, maxlen, "");
 	}
@@ -1555,6 +1588,115 @@ void TryUpgradeAttr(int client, int attr)
 	ReopenMenu(client, -2);
 }
 
+/* ---------- 测试面板（临时） ----------
+ *  !test 打开。受 sm_bm_cheat_enabled 控制，正式发布前整段可以删掉。
+ *  目前只有一项：撤销加点（把已买属性的点数原价退回，等级清零）。
+ */
+
+public Action Cmd_TestMenu(int client, int args)
+{
+	if (client == 0)
+	{
+		return Plugin_Handled;
+	}
+
+	if (!g_cvCheatEnabled.BoolValue)
+	{
+		PrintToChat(client, "%s 测试面板已关闭（把 sm_bm_cheat_enabled 设成 1 才能用）", BM_TAG);
+		return Plugin_Handled;
+	}
+
+	ShowTestMenu(client);
+	return Plugin_Handled;
+}
+
+void ShowTestMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_Test);
+	menu.SetTitle("黑市测试面板\n点数 %d ｜ 火力 %d / 近战 %d / 投掷 %d / 换弹 %d / 体能 %d",
+		g_iPoints[client],
+		g_iAttr[client][ATTR_DMG],
+		g_iAttr[client][ATTR_MELEE],
+		g_iAttr[client][ATTR_THROW],
+		g_iAttr[client][ATTR_RELOAD],
+		g_iAttr[client][ATTR_SPD]);
+
+	menu.AddItem("refund", "撤销加点（按原价退还全部已花点数）");
+	menu.ExitButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_Test(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[16];
+			menu.GetItem(param2, info, sizeof(info));
+
+			if (StrEqual(info, "refund"))
+			{
+				int refund = RefundAllAttrs(param1);
+				if (refund > 0)
+				{
+					PrintToChat(param1, "%s 已撤销加点，退还 \x04%d\x01 点，当前 \x04%d\x01 点",
+						BM_TAG, refund, g_iPoints[param1]);
+				}
+				else
+				{
+					PrintToChat(param1, "%s 当前没有可撤销的加点（属性全是 0 级）", BM_TAG);
+				}
+				CreateTimer(0.1, Timer_ReopenTestMenu, GetClientUserId(param1), TIMER_FLAG_NO_MAPCHANGE);
+			}
+		}
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+	}
+	return 0;
+}
+
+public Action Timer_ReopenTestMenu(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client > 0 && IsClientInGame(client))
+	{
+		ShowTestMenu(client);
+	}
+	return Plugin_Stop;
+}
+
+// 把五项属性全清零，并按当初的售价把点数退回去
+int RefundAllAttrs(int client)
+{
+	int refund = 0;
+
+	for (int a = 0; a < ATTR_MAX; a++)
+	{
+		int lvl = g_iAttr[client][a];
+		if (lvl > ATTR_LV_MAX)
+		{
+			lvl = ATTR_LV_MAX;
+		}
+
+		for (int i = 0; i < lvl; i++)
+		{
+			refund += AttrPrice(a, i);
+		}
+
+		g_iAttr[client][a] = 0;
+	}
+
+	g_iPoints[client] += refund;
+
+	ApplyAttrs(client);
+	SavePlayer(client);   // 点数和属性一起写库
+
+	return refund;
+}
+
 /* ---------- 效果 ---------- */
 
 void ApplyAttrs(int client)
@@ -1594,6 +1736,39 @@ public Action Timer_ApplyAttrs(Handle timer, any userid)
 	return Plugin_Stop;
 }
 
+/* ---------- 换弹强化 ----------
+ *  参考实现：hardmod2 / l4d_powerups_rush.sp（tPoncho 的 fast reload 代码）
+ *    https://github.com/spumer/hardmod2/blob/master/sources/l4d_powerups_rush.sp
+ *
+ *  旧写法只改 m_flNextPrimaryAttack —— 换弹结束时引擎会重新写这个值，所以等于没做。
+ *  可用的做法是在 weapon_reload 当下同时改这几处：
+ *    1. m_flPlaybackRate = 1/rate      让换弹动画本身加速
+ *    2. m_flTimeWeaponIdle             武器空闲时间跟着提前
+ *    3. m_flNextPrimaryAttack          武器可开火时间提前
+ *    4. 玩家 m_flNextAttack            玩家动作时间提前
+ *    5. 换弹结束后把 m_flPlaybackRate 还原成 1.0
+ *  霰弹枪不是弹匣类（按发塞弹），走 CBaseShotgun 的
+ *  m_reloadStartDuration / m_reloadInsertDuration / m_reloadEndDuration。
+ */
+
+// 调试信息：开了 sm_bm_debug 时同时打到聊天框和服务器控制台，方便实机验证
+void DebugChat(int client, const char[] fmt, any ...)
+{
+	if (!g_cvDebug.BoolValue)
+	{
+		return;
+	}
+
+	char buf[256];
+	VFormat(buf, sizeof(buf), fmt, 3);
+
+	if (client > 0)
+	{
+		PrintToChat(client, "%s [调试] %s", BM_TAG, buf);
+	}
+	PrintToServer("[BlackMarket] %s", buf);
+}
+
 public void Event_WeaponReload(Event event, const char[] name, bool dontBroadcast)
 {
 	if (!g_cvAttrs.BoolValue || !g_cvEnabled.BoolValue)
@@ -1602,7 +1777,7 @@ public void Event_WeaponReload(Event event, const char[] name, bool dontBroadcas
 	}
 
 	int client = GetClientOfUserId(event.GetInt("userid"));
-	if (client < 1 || client > MaxClients || !IsClientInGame(client))
+	if (client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
 	{
 		return;
 	}
@@ -1619,20 +1794,356 @@ public void Event_WeaponReload(Event event, const char[] name, bool dontBroadcas
 		return;
 	}
 
+	float rate = 1.0 - g_cvReloadStep.FloatValue * float(lvl);
+	if (rate < g_cvReloadFloor.FloatValue)
+	{
+		rate = g_cvReloadFloor.FloatValue;
+	}
+
+	char cls[64];
+	GetEntityClassname(weapon, cls, sizeof(cls));
+
+	if (StrContains(cls, "shotgun") != -1)
+	{
+		BoostShotgunReload(client, weapon, cls, rate);
+	}
+	else
+	{
+		BoostMagazineReload(client, weapon, cls, rate);
+	}
+}
+
+void BoostMagazineReload(int client, int weapon, const char[] cls, float rate)
+{
 	float now = GetGameTime();
 	float npa = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
-	if (npa <= now)
+	float dur = npa - now;
+
+	if (dur <= 0.05 || dur > 6.0)
+	{
+		DebugChat(client, "换弹加速跳过 %s：间隔异常 %.3f 秒", cls, dur);
+		return;
+	}
+
+	// 榴弹发射器：在强化基础上再多缩一点
+	if (StrContains(cls, "grenade_launcher") != -1)
+	{
+		rate *= g_cvGrenadeMult.FloatValue;
+		if (rate < g_cvReloadFloor.FloatValue)
+		{
+			rate = g_cvReloadFloor.FloatValue;
+		}
+		DebugChat(client, "榴弹发射器额外加速：本发倍率 %.2f", rate);
+	}
+
+	float newEnd = now + dur * rate;
+
+	bool hasPb   = HasEntProp(weapon, Prop_Send, "m_flPlaybackRate");
+	bool hasIdle = HasEntProp(weapon, Prop_Send, "m_flTimeWeaponIdle");
+
+	if (hasPb)
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0 / rate);
+		SchedulePlaybackReset(client, weapon, dur * rate);
+	}
+
+	if (hasIdle)
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flTimeWeaponIdle", newEnd);
+	}
+
+	SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", newEnd);
+	SetEntPropFloat(client, Prop_Send, "m_flNextAttack", newEnd);
+
+	// 同步给狙击拉栓的轮询：让那边把“这次写入”当成已知值，避免在换弹上再缩一次
+	g_iBoltWeapon[client] = weapon;
+	g_fBoltNext[client]   = newEnd;
+	g_fReloadBusy[client] = newEnd;   // 换弹期间别让拉栓那条逻辑抢播放倍率
+
+	// 动画对齐：把 viewmodel 的层起始时间往前推掉“省下来”的那段时间，
+	// 否则客户端时间轴还是按原时长走，会出现整套换弹动画重播一遍的情况
+	if (g_iViewModelO >= 0 && g_iVMStartTimeO >= 0)
+	{
+		float cut = dur * (1.0 - rate);
+		float delay = dur * rate - 0.4;
+		if (delay > 0.0)
+		{
+			DataPack dp = new DataPack();
+			dp.WriteCell(GetClientUserId(client));
+			dp.WriteFloat(now - cut);
+			CreateTimer(delay, Timer_AlignViewModel, dp, TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
+		}
+	}
+
+	DebugChat(client, "换弹加速 %s：%.3fs -> %.3fs（rate %.2f, playbackRate=%s, idle=%s）",
+		cls, dur, dur * rate, rate,
+		hasPb ? "有" : "无", hasIdle ? "有" : "无");
+}
+
+// 把 viewmodel 的动画层起始时间往前挪，让客户端动画和加速后的服务端时间对得上
+public Action Timer_AlignViewModel(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	float startTime = dp.ReadFloat();
+
+	int client = GetClientOfUserId(userid);
+	if (client <= 0 || !IsClientInGame(client))
+	{
+		return Plugin_Stop;
+	}
+
+	int vm = GetEntDataEnt2(client, g_iViewModelO);
+	if (vm <= 0 || !IsValidEntity(vm))
+	{
+		DebugChat(client, "换弹动画对齐跳过：拿不到 viewmodel");
+		return Plugin_Stop;
+	}
+
+	SetEntDataFloat(vm, g_iVMStartTimeO, startTime, true);
+	DebugChat(client, "换弹动画已对齐 viewmodel（start=%.3f）", startTime);
+
+	return Plugin_Stop;
+}
+
+/* ---------- 狙击枪拉栓（射击间隔） ----------
+ *  L4D2 的狙击枪每打一发都要等拉栓，这段时间就是 m_flNextPrimaryAttack 的间隔。
+ *  做法参考 hardmod2 的 double-tap：每帧轮询，一旦发现间隔被引擎重新写大（= 刚开过枪），
+ *  就按倍率缩短。必须记录“上次写入的值”，否则每帧都会再乘一次，越缩越短。
+ */
+
+bool IsSniperWeapon(const char[] cls)
+{
+	return (StrContains(cls, "hunting_rifle") != -1 || StrContains(cls, "sniper") != -1);
+}
+
+void RestoreWeaponPlayback(int weapon)
+{
+	if (weapon > 0 && IsValidEntity(weapon) && HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0);
+	}
+}
+
+public void OnGameFrame()
+{
+	if (!g_cvAttrs.BoolValue || !g_cvEnabled.BoolValue || !g_cvSniperBolt.BoolValue)
 	{
 		return;
 	}
 
-	float factor = 1.0 - 0.12 * lvl;
-	if (factor < 0.5)
+	float now = GetGameTime();
+
+	for (int i = 1; i <= MaxClients; i++)
 	{
-		factor = 0.5;
+		int prev = g_iBoltWeapon[i];
+		int weapon = -1;
+		char cls[64];
+
+		bool ok = (IsClientInGame(i) && !IsFakeClient(i) && IsPlayerAlive(i)
+		           && g_iAttr[i][ATTR_RELOAD] > 0);
+
+		if (ok)
+		{
+			weapon = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
+			if (weapon <= 0 || !IsValidEntity(weapon))
+			{
+				ok = false;
+			}
+			else
+			{
+				GetEntityClassname(weapon, cls, sizeof(cls));
+				if (!IsSniperWeapon(cls))
+				{
+					ok = false;
+				}
+			}
+		}
+
+		if (!ok)
+		{
+			RestoreWeaponPlayback(prev);
+			g_iBoltWeapon[i] = 0;
+			g_fBoltNext[i]   = 0.0;
+			continue;
+		}
+
+		float rate = 1.0 - g_cvReloadStep.FloatValue * float(g_iAttr[i][ATTR_RELOAD]);
+		if (rate < g_cvSniperFloor.FloatValue)
+		{
+			rate = g_cvSniperFloor.FloatValue;
+		}
+
+		// 换枪 / 刚拿起：把上一把的倍率还原，这一帧只记录，不改
+		if (prev != weapon)
+		{
+			if (prev != 0)
+			{
+				RestoreWeaponPlayback(prev);
+			}
+			g_iBoltWeapon[i] = weapon;
+			g_fBoltNext[i] = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+			continue;
+		}
+
+		// 拉栓动画：常驻倍速。先前“开火后那一刻才改倍率”会让动画中途变速，整套动作重播一遍
+		// 注意：SendWeaponAnim 每次发动画都会把武器的 m_flPlaybackRate 重置成 1.0，
+		// 所以这里改倍率必然发生在“动画已经开始之后”，引擎会把整段开火动画重发一次
+		// （表现就是多发一个弹壳）。因此默认关闭，只保留射击间隔缩短。
+		if (now >= g_fReloadBusy[i] && HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
+		{
+			if (g_cvSniperAnim.BoolValue && rate < 1.0)
+			{
+				float desired = 1.0 / rate;
+				float cur = GetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate");
+				if (cur > desired + 0.01 || cur < desired - 0.01)
+				{
+					SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", desired);
+					g_iPlaybackGen[i]++;   // 作废还挂着的倍率复位
+				}
+			}
+			else if (GetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate") > 1.01)
+			{
+				RestoreWeaponPlayback(weapon);
+			}
+		}
+
+		float npa = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+		if (npa <= g_fBoltNext[i] + 0.01)
+		{
+			continue;
+		}
+
+		float interval = npa - now;
+		if (interval <= 0.0 || interval > 3.0)
+		{
+			g_fBoltNext[i] = npa;
+			continue;
+		}
+
+		float newTime = now + interval * rate;
+		g_fBoltNext[i] = newTime;
+
+		SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", newTime);
+		if (HasEntProp(weapon, Prop_Send, "m_flTimeWeaponIdle"))
+		{
+			SetEntPropFloat(weapon, Prop_Send, "m_flTimeWeaponIdle", newTime);
+		}
+		SetEntPropFloat(i, Prop_Send, "m_flNextAttack", newTime);
+
+		DebugChat(i, "狙击拉栓 %s：%.3fs -> %.3fs（rate %.2f）", cls, interval, interval * rate, rate);
+	}
+}
+
+void BoostShotgunReload(int client, int weapon, const char[] cls, float rate)
+{
+	float tStart, tInsert, tEnd;
+
+	if (StrContains(cls, "autoshotgun") != -1)
+	{
+		tStart = 0.666666;  tInsert = 0.4;    tEnd = 0.675;
+	}
+	else if (StrContains(cls, "shotgun_spas") != -1)
+	{
+		tStart = 0.5;       tInsert = 0.375;  tEnd = 0.7;
+	}
+	else
+	{
+		tStart = 0.5;       tInsert = 0.5;    tEnd = 0.6;
 	}
 
-	SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + (npa - now) * factor);
+	if (!HasEntProp(weapon, Prop_Send, "m_reloadStartDuration"))
+	{
+		DebugChat(client, "霰弹枪加速不可用：%s 没有 m_reloadStartDuration", cls);
+		return;
+	}
+
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadStartDuration",  tStart  * rate);
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadInsertDuration", tInsert * rate);
+	SetEntPropFloat(weapon, Prop_Send, "m_reloadEndDuration",    tEnd    * rate);
+
+	if (HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0 / rate);
+	}
+
+	DataPack dp = new DataPack();
+	dp.WriteCell(GetClientUserId(client));
+	dp.WriteCell(EntIndexToEntRef(weapon));
+	CreateTimer(0.3, Timer_ShotgunReloadWatch, dp, TIMER_REPEAT | TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
+
+	DebugChat(client, "霰弹枪加速 %s：start/insert/end = %.3f/%.3f/%.3f（rate %.2f）",
+		cls, tStart * rate, tInsert * rate, tEnd * rate, rate);
+}
+
+// 记下发一个“播放倍率复位”，带代号：如果期间又被新的倍率覆盖，这次复位就作废
+void SchedulePlaybackReset(int client, int weapon, float delay)
+{
+	g_iPlaybackGen[client]++;
+
+	DataPack dp = new DataPack();
+	dp.WriteCell(GetClientUserId(client));
+	dp.WriteCell(g_iPlaybackGen[client]);
+	dp.WriteCell(EntIndexToEntRef(weapon));
+	CreateTimer(delay, Timer_ResetPlayback, dp, TIMER_DATA_HNDL_CLOSE | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_ResetPlayback(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int client = GetClientOfUserId(dp.ReadCell());
+	int gen    = dp.ReadCell();
+	int entref = dp.ReadCell();
+
+	if (client <= 0 || gen != g_iPlaybackGen[client])
+	{
+		return Plugin_Stop;
+	}
+
+	int weapon = EntRefToEntIndex(entref);
+	if (weapon > 0 && IsValidEntity(weapon))
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0);
+	}
+	return Plugin_Stop;
+}
+
+public Action Timer_ShotgunReloadWatch(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	int entref = dp.ReadCell();
+
+	int client = GetClientOfUserId(userid);
+	int weapon = EntRefToEntIndex(entref);
+
+	if (client <= 0 || weapon <= 0 || !IsValidEntity(weapon) || !IsClientInGame(client))
+	{
+		return Plugin_Stop;
+	}
+
+	// m_reloadState: 0 = 没在换弹，1/2 = 正在塞弹
+	if (HasEntProp(weapon, Prop_Send, "m_reloadState") && GetEntProp(weapon, Prop_Send, "m_reloadState") != 0)
+	{
+		return Plugin_Continue;
+	}
+
+	if (HasEntProp(weapon, Prop_Send, "m_flPlaybackRate"))
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 1.0);
+	}
+
+	float now = GetGameTime();
+	SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + 0.1);
+	if (HasEntProp(weapon, Prop_Send, "m_flTimeWeaponIdle"))
+	{
+		SetEntPropFloat(weapon, Prop_Send, "m_flTimeWeaponIdle", now + 0.1);
+	}
+	SetEntPropFloat(client, Prop_Send, "m_flNextAttack", now + 0.1);
+
+	DebugChat(client, "霰弹枪换弹结束，playbackRate 已还原");
+
+	return Plugin_Stop;
 }
 
 public void OnEntityCreated(int entity, const char[] classname)
