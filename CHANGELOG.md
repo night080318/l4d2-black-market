@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.6 — 2026-11-15
+
+### 修复：弹药升级（燃烧弹 / 高爆弹）永远提示“背包已满”
+
+这两样不是可拾取物品，而是写在武器上的属性标志位，`GivePlayerItem` 对它们必然返回 `-1`；旧代码把失败统一报成“发放失败（可能背包已满）”，所以背包空着也一直这么提示。
+
+改为直接写主武器（参考 [Tuan_upgrade_ammo_pack.sp](https://github.com/tuan0919/l4d2-sourcemod/blob/main/using-plugins/Tuan_upgrade_ammo_pack_04.29.2026/Tuan_upgrade_ammo_pack.sp)）：
+
+```
+m_upgradeBitVec                 位标志：1 = 燃烧弹，2 = 高爆弹
+m_nUpgradedPrimaryAmmoLoaded    强化弹药数量，设为当前弹匣量
+```
+
+- 没有主武器时提示「需要先拿一把主武器」，**不扣点**
+- 已经装了同类弹药时提示「你的枪已经是这种弹药了」，**不扣点**
+- 燃烧 ↔ 高爆互相切换会清掉旧标志位
+
+### 修复：激光瞄准发不出来
+
+激光瞄准是挂在武器上的**实体**，同样不能用 `GivePlayerItem`。改成先尝试发放，失败则回退到引擎自带的升级命令：
+
+```
+sv_cheats 临时置 1 → upgrade_add laser_sight → 0.3 秒后还原
+```
+
+### 说明
+
+`!test` 临时面板保持不变（撤销加点 / 速度调试 / 伤害诊断 / 处决人机队友）。
+
 ## 1.4.5 — 2026-11-15
 
 ### 新增：进服自动绑定 B 键打开商店

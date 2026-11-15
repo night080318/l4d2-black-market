@@ -19,7 +19,7 @@
 #include <dbi>
 
 
-#define PLUGIN_VERSION  "1.4.5"
+#define PLUGIN_VERSION  "1.4.6"
 #define BM_TAG          "\x04[黑市]\x01"
 #define MAX_SHOP_ITEMS  32
 #define ATTR_MAX        5
@@ -762,6 +762,91 @@ public Action Timer_ReopenMenu(Handle timer, DataPack dp)
 	return Plugin_Stop;
 }
 
+/* 弹药升级：燃烧弹 / 高爆弹不是可拾取物品，GivePlayerItem 必然返回 -1。
+ * 正确做法是直接写主武器的 m_upgradeBitVec（1=燃烧 2=爆炸），
+ * 再把 m_nUpgradedPrimaryAmmoLoaded 设成当前弹匣量——这就是原版升级包干的事。
+ * 参考：github.com/tuan0919/l4d2-sourcemod 的 Tuan_upgrade_ammo_pack.sp
+ */
+bool IsAmmoUpgrade(const char[] cls)
+{
+	return (StrEqual(cls, "upgrade_ammo_incendiary") || StrEqual(cls, "upgrade_ammo_explosive"));
+}
+
+// 成功返回武器实体索引，失败返回 -1
+int ApplyAmmoUpgrade(int client, const char[] cls)
+{
+	int weapon = GetPlayerWeaponSlot(client, 0);
+	if (weapon <= 0 || !IsValidEntity(weapon))
+	{
+		return -1;
+	}
+
+	if (!HasEntProp(weapon, Prop_Send, "m_upgradeBitVec"))
+	{
+		return -1;
+	}
+
+	int bit = StrEqual(cls, "upgrade_ammo_explosive") ? 2 : 1;
+	int bits = GetEntProp(weapon, Prop_Send, "m_upgradeBitVec");
+
+	// 同类型已经装过就别重复扣点
+	if ((bits & bit) != 0)
+	{
+		return -2;
+	}
+
+	bits &= ~3;
+	bits |= bit;
+	SetEntProp(weapon, Prop_Send, "m_upgradeBitVec", bits);
+
+	if (HasEntProp(weapon, Prop_Send, "m_nUpgradedPrimaryAmmoLoaded"))
+	{
+		int clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
+		SetEntProp(weapon, Prop_Send, "m_nUpgradedPrimaryAmmoLoaded", clip > 0 ? clip : 0);
+	}
+
+	return weapon;
+}
+
+/* 激光瞄准：它是挂在枪上的实体，GivePlayerItem 发不出来。
+ * 备选方案是引擎自带的 upgrade_add 命令（原本是作弊命令），
+ * 临时开 sv_cheats 执行完立刻还原。 */
+bool TryGiveLaserSight(int client)
+{
+	int weapon = GetPlayerWeaponSlot(client, 0);
+	if (weapon <= 0 || !IsValidEntity(weapon))
+	{
+		return false;
+	}
+
+	ConVar cheats = FindConVar("sv_cheats");
+	bool restore = false;
+
+	if (cheats != null && cheats.IntValue == 0)
+	{
+		cheats.SetInt(1);
+		restore = true;
+	}
+
+	ClientCommand(client, "upgrade_add laser_sight");
+
+	if (restore)
+	{
+		CreateTimer(0.3, Timer_RestoreCheatsLaser, _, TIMER_FLAG_NO_MAPCHANGE);
+	}
+	return true;
+}
+
+public Action Timer_RestoreCheatsLaser(Handle timer)
+{
+	ConVar cheats = FindConVar("sv_cheats");
+	if (cheats != null)
+	{
+		cheats.SetInt(0);
+	}
+	return Plugin_Stop;
+}
+
 void TryBuy(int client, int idx)
 {
 	if (idx < 0 || idx >= g_iShopCount)
@@ -794,13 +879,42 @@ void TryBuy(int client, int idx)
 	char cls[48];
 	strcopy(cls, sizeof(cls), g_eShop[idx].cls);
 
-	int ent = GivePlayerItem(client, cls);
-	if (ent == -1)
+	int ent;
+	if (IsAmmoUpgrade(cls))
 	{
-		PrintToChat(client, "%s 发放失败（可能背包已满），没扣你的点", BM_TAG);
-		LogError("[BlackMarket] GivePlayerItem 失败: client=%L item=%s", client, cls);
-		ReopenMenu(client, -1);
-		return;
+		ent = ApplyAmmoUpgrade(client, cls);
+		if (ent == -1)
+		{
+			PrintToChat(client, "%s 需要先拿一把主武器才能装弹药升级", BM_TAG);
+			ReopenMenu(client, -1);
+			return;
+		}
+		if (ent == -2)
+		{
+			PrintToChat(client, "%s 你的枪已经是这种弹药了，没扣点", BM_TAG);
+			ReopenMenu(client, -1);
+			return;
+		}
+	}
+	else
+	{
+		ent = GivePlayerItem(client, cls);
+		if (ent == -1 && StrEqual(cls, "upgrade_laser_sight"))
+		{
+			// 激光瞄准走引擎自己的 upgrade_add
+			if (TryGiveLaserSight(client))
+			{
+				ent = GetPlayerWeaponSlot(client, 0);
+			}
+		}
+
+		if (ent == -1)
+		{
+			PrintToChat(client, "%s 发放失败（可能背包已满），没扣你的点", BM_TAG);
+			LogError("[BlackMarket] GivePlayerItem 失败: client=%L item=%s", client, cls);
+			ReopenMenu(client, -1);
+			return;
+		}
 	}
 
 	g_iPoints[client] -= price;
