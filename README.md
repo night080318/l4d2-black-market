@@ -47,7 +47,7 @@ A supply-point economy for Left 4 Dead 2 co-op. Kill special infected, earn poin
 
 ### 配套资源
 
-- **一键安装包** `BlackMarket_Installer_v1.4.2.zip` —— 双击自动找游戏目录、装好 MetaMod + SourceMod + 插件，适合不想手动折腾的朋友
+- **一键安装包** `BlackMarket_Installer_v1.4.7.zip` —— 双击自动找游戏目录、装好 MetaMod + SourceMod + 插件，适合不想手动折腾的朋友
 - **创意工坊音效包** `Black Market Sound Pack` —— 订阅后在装了本插件的服务器里会有购买成功 / 补点不足两种提示音；没订阅也能正常玩，只是没声音（**每位玩家都要自己订阅**）
 
 ### 命令
